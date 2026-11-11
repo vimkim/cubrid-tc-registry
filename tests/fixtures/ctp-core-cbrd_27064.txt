@@ -1,0 +1,97 @@
+=================================== CORE ANALYZER ===================================
+	CORE FILE   : [/home/cubrid-testcases-private-ex/shell/_37_elderberry/cbrd_23842_cdc/bug/cbrd_27064/cases/core.84625]
+	HOME        : [/home]
+	JAVA_HOME   : [/usr/lib/jvm/java-1.8.0]
+	PROCESS NAME: [cub_server]
+	SUMMARY     : [Core dumped in oos_check_head_header at src/storage/oos_file.cpp:2600]
+	DETAIL STACK:
+--------------------------------------------------------
+#0  0x00007fb9deee15af in raise () from /lib64/libc.so.6
+#1  0x00007fb9deeb4ee5 in abort () from /lib64/libc.so.6
+#2  0x0000558551a1bf45 in abort_handler (signo=6, siginfo=<optimized out>, 
+    dummyp=<optimized out>) at /home/cubrid/src/executables/server.c:264
+#3  <signal handler called>
+#4  0x00007fb9deee15af in raise () from /lib64/libc.so.6
+#5  0x00007fb9deeb4ee5 in abort () from /lib64/libc.so.6
+#6  0x00007fb9deeb4db9 in __assert_fail_base.cold.0 () from /lib64/libc.so.6
+#7  0x00007fb9deed9f06 in __assert_fail () from /lib64/libc.so.6
+#8  0x00007fb9e0bb0ec3 in oos_check_head_header (header=..., header=..., 
+    oid=..., expected_length=<optimized out>)
+    at /home/cubrid/src/storage/oos_file.cpp:2600
+#9  0x00007fb9e0bb261a in oos_check_head_header (header=..., header=..., 
+    oid=..., expected_length=<optimized out>)
+    at /home/cubrid/src/storage/oos_file.cpp:2615
+#10 oos_read (thread_p=thread_p@entry=0x7fb9e1871e18, oid=..., dest=...)
+    at /home/cubrid/src/storage/oos_file.cpp:2638
+#11 0x00007fb9e0b7b976 in heap_attrvalue_read_oos_inline (
+    oos_owned_buffer=0x7fb98f7f168f, oos_scratch_size=16384, 
+    oos_scratch=0x7fb98f7f16b0 "\350\374\350\243\004ц\267\263\207(꛲-V4\362\303{\035\350\315Y\211\270#/\017\251\062\216r/\345\034\264\312\324 |nUc\325)\f\351\023\023hb\317\373t`\213K\265uK\262i\351\032\362\305\025\fcu\r\206;\356\025:\252YR\274\070jp\320\303$ڠ?\340\304\061\310]'\206B\242\006>\256\261\373a\374r'\371!j\276\030\203\017\251\241\323{\371ƞ\237\361V@\n\234\060\330\364\306\306\066ѫ3\303\\\231&\202\353\255'\341\325]\200sŢ&l\357è\331k$\213۩%k\020J\031\346ں\032\344\064],L\270\262&\311[\001o(\270\240=\352\336\346 m\217\252}\237Q\032W"..., 
+    raw=0x7fb98f7f1690, recdes=0x7fb98f7f59c0)
+    at /home/cubrid/src/base/span.hpp:52
+#12 heap_attrvalue_point_variable (recdes=recdes@entry=0x7fb98f7f59c0, 
+    raw=raw@entry=0x7fb98f7f1690, 
+    oos_owned_buffer=oos_owned_buffer@entry=0x7fb98f7f168f, 
+    oos_scratch=0x7fb98f7f16b0 "\350\374\350\243\004ц\267\263\207(꛲-V4\362\303{\035\350\315Y\211\270#/\017\251\062\216r/\345\034\264\312\324 |nUc\325)\f\351\023\023hb\317\373t`\213K\265uK\262i\351\032\362\305\025\fcu\r\206;\356\025:\252YR\274\070jp\320\303$ڠ?\340\304\061\310]'\206B\242\006>\256\261\373a\374r'\371!j\276\030\203\017\251\241\323{\371ƞ\237\361V@\n\234\060\330\364\306\306\066ѫ3\303\\\231&\202\353\255'\341\325]\200sŢ&l\357è\331k$\213۩%k\020J\031\346ں\032\344\064],L\270\262&\311[\001o(\270\240=\352\336\346 m\217\252}\237Q\032W"..., 
+    attrepr=0x7fb6b400f640, attrepr=0x7fb6b400f640, attr_info=0x7fb98f7f5840, 
+    oos_scratch_size=16384) at /home/cubrid/src/storage/heap_file.c:10547
+#13 0x00007fb9e0b7c067 in heap_attrvalue_read (
+    recdes=recdes@entry=0x7fb98f7f59c0, value=0x5585560b9b50, 
+    attr_info=attr_info@entry=0x7fb98f7f5840)
+    at /home/cubrid/src/storage/heap_file.c:10681
+#14 0x00007fb9e0b84880 in heap_attrinfo_read_dbvalues_individually (
+    attr_info=<optimized out>, recdes=<optimized out>)
+    at /home/cubrid/src/storage/heap_file.c:10714
+#15 heap_attrinfo_read_dbvalues_with_oos_prefetch (thread_p=<optimized out>, 
+    recdes=0x7fb98f7f59c0, attr_info=0x7fb98f7f5840)
+    at /home/cubrid/src/storage/heap_file.c:10779
+#16 0x00007fb9e0b91bec in heap_attrinfo_read_dbvalues (
+    thread_p=0x7fb9e1871e18, inst_oid=0x7fb98f7f5818, recdes=0x7fb98f7f59c0, 
+    attr_info=0x7fb98f7f5840) at /home/cubrid/src/storage/heap_file.c:11012
+#17 0x00007fb9e0c68d80 in cdc_make_dml_loginfo (
+    thread_p=thread_p@entry=0x7fb9e1871e18, trid=2390, 
+    user=user@entry=0x7fb66c001490 "DBA", dml_type=CDC_UPDATE, classoid=..., 
+    undo_recdes=0x7fb98f7f59c0, redo_recdes=0x7fb98f7f59e0, 
+    dml_entry=0x7fb98f7fda90, is_flashback=false)
+    at /home/cubrid/src/transaction/log_manager.c:13040
+#18 0x00007fb9e0c6b282 in cdc_log_extract (
+    thread_p=thread_p@entry=0x7fb9e1871e18, 
+    process_lsa=process_lsa@entry=0x7fb98f7fda78, 
+    log_info_entry=log_info_entry@entry=0x7fb98f7fda90)
+    at /home/cubrid/src/transaction/log_manager.c:11015
+#19 0x00007fb9e0c6bad2 in cdc_loginfo_producer_execute (thread_ref=...)
+    at /home/cubrid/src/transaction/log_manager.c:11242
+#20 0x00007fb9e0bff52d in cubthread::daemon::loop_with_context (
+    daemon_arg=0x558557875960, entry_manager_arg=0x55855396c628, 
+    exec_arg=0x558557875910, name=<optimized out>)
+    at /home/cubrid/src/thread/thread_daemon.cpp:230
+#21 0x00007fb9e1029183 in execute_native_thread_routine ()
+   from /home/CUBRID/lib/libcubrid.so.11.5
+#22 0x00007fb9e02f11ca in start_thread () from /lib64/libpthread.so.0
+#23 0x00007fb9deecc953 in clone () from /lib64/libc.so.6
+--------------------------------------------------------
+	STACK DIGEST:
+#0	raise	<EXTERNAL LIBRARY>
+#1	abort	<EXTERNAL LIBRARY>
+#2	abort_handler	src/executables/server.c
+#3	<signal	<UNKNOWN>
+#4	raise	<EXTERNAL LIBRARY>
+#5	abort	<EXTERNAL LIBRARY>
+#6	__assert_fail_base.cold.0	<EXTERNAL LIBRARY>
+#7	__assert_fail	<EXTERNAL LIBRARY>
+#8	oos_check_head_header	src/storage/oos_file.cpp
+#9	oos_check_head_header	src/storage/oos_file.cpp
+#10	oos_read	src/storage/oos_file.cpp
+#11	heap_attrvalue_read_oos_inline	src/base/span.hpp
+#12	heap_attrvalue_point_variable	src/storage/heap_file.c
+#13	heap_attrvalue_read	src/storage/heap_file.c
+#14	heap_attrinfo_read_dbvalues_individually	src/storage/heap_file.c
+#15	heap_attrinfo_read_dbvalues_with_oos_prefetch	src/storage/heap_file.c
+#16	heap_attrinfo_read_dbvalues	src/storage/heap_file.c
+#17	cdc_make_dml_loginfo	src/transaction/log_manager.c
+#18	cdc_log_extract	src/transaction/log_manager.c
+#19	cdc_loginfo_producer_execute	src/transaction/log_manager.c
+#20	cubthread::daemon::loop_with_context	src/thread/thread_daemon.cpp
+#21	execute_native_thread_routine	<EXTERNAL LIBRARY>
+#22	start_thread	<EXTERNAL LIBRARY>
+#23	clone	<EXTERNAL LIBRARY>
+<END>

@@ -1,0 +1,39 @@
+Reconstructed from the frames recorded in my-cubrid-skills commit 0b0707d, not copied from a core.
+=================================== CORE ANALYZER ===================================
+	PROCESS NAME: [cub_server]
+	SUMMARY     : [Core dumped in pgbuf_fix_debug at src/storage/page_buffer.c:2487]
+	DETAIL STACK:
+--------------------------------------------------------
+#0  0x00007f544ec4b5af in raise () from /lib64/libc.so.6
+#1  0x00007f544ec1eee5 in abort () from /lib64/libc.so.6
+#2  0x0000558db76f9f45 in abort_handler (signo=6, siginfo=<optimized out>, 
+    dummyp=<optimized out>) at /home/cubrid/src/executables/server.c:264
+#3  <signal handler called>
+#4  0x00007f544ec4b5af in raise () from /lib64/libc.so.6
+#5  0x00007f544ec1eee5 in abort () from /lib64/libc.so.6
+#6  0x00007f544ec1edb9 in __assert_fail_base.cold.0 () from /lib64/libc.so.6
+#7  0x00007f544ec43f06 in __assert_fail () from /lib64/libc.so.6
+#8  0x00007f545093b65d in pgbuf_fix_debug (
+    thread_p=0x7f5451601e18, vpid=0x7f540f7fd8a0, fetch_mode=OLD_PAGE, 
+    request_mode=PGBUF_LATCH_WRITE, condition=PGBUF_UNCONDITIONAL_LATCH, 
+    caller_file=0x7f5450f5c3a8 "/home/cubrid/src/query/vacuum.c", caller_line=1776)
+    at /home/cubrid/src/storage/page_buffer.c:2487
+#9  0x00007f5450b2a1d4 in vacuum_heap_page (thread_p=0x7f5451601e18, 
+    heap_objects=0x7f53f8001240, n_heap_objects=3, threshold_mvccid=1234, 
+    hfid=0x7f540f7fdb10, reusable=0x7f540f7fdb0f, was_interrupted=false)
+    at /home/cubrid/src/query/vacuum.c:1776
+#10 0x00007f5450b2c8f0 in vacuum_heap (thread_p=0x7f5451601e18, 
+    worker=0x7f5451602000, threshold_mvccid=1234, was_interrupted=false)
+    at /home/cubrid/src/query/vacuum.c:1580
+#11 0x00007f5450b30a11 in vacuum_process_log_block (thread_p=0x7f5451601e18, 
+    data=0x7f53f8000b70, block_log_buffer=0x0, sa_mode_partial_block=false)
+    at /home/cubrid/src/query/vacuum.c:3401
+#12 0x00007f5450b3711c in vacuum_worker_task::execute (this=0x7f53f8000f00, 
+    thread_ref=...) at /home/cubrid/src/query/vacuum.c:7010
+#13 0x00007f5450bff52d in cubthread::worker_pool::core::worker::execute_current_task (
+    this=0x7f5450ab0000) at /home/cubrid/src/thread/thread_worker_pool.hpp:1110
+#14 0x00007f5451029183 in execute_native_thread_routine ()
+#15 0x00007f54502f11ca in start_thread () from /lib64/libpthread.so.0
+#16 0x00007f544ec26953 in clone () from /lib64/libc.so.6
+--------------------------------------------------------
+<END>
