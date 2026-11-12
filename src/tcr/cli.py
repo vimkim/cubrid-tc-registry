@@ -66,6 +66,8 @@ def cmd_show(args, store):
 
 def cmd_check(args, store):
     stack_text = Path(args.stack_file).read_text(errors="replace") if args.stack_file else None
+    if not args.offline:
+        _require_engine_repo(args.engine_repo)
     tc = None
     if args.case:
         tc = resolve(store, args.case, args.suite, create=False)
@@ -105,6 +107,14 @@ def cmd_check(args, store):
     if "context" in result:
         lines += ["", view.render(result["context"])]
     emit(args, result, "\n".join(lines))
+
+
+def _require_engine_repo(repo):
+    if not repo:
+        raise RegistryError("set TCR_ENGINE_REPO or pass --engine-repo to a CUBRID engine clone;"
+                            " pass --offline to skip the Jira and Git reads")
+    if not Path(repo, ".git").exists():
+        raise RegistryError(f"engine repository {repo} is not a Git checkout")
 
 
 def _overall(hits) -> str:
@@ -267,7 +277,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--suite", choices=sorted(SUITE_REPOSITORY))
     s.add_argument("--engine", required=True, help="tested Engine commit")
     s.add_argument("--stack-file", help="core backtrace text")
-    s.add_argument("--engine-repo", default=verdict.DEFAULT_ENGINE_REPO)
+    s.add_argument("--engine-repo", default=os.environ.get("TCR_ENGINE_REPO"),
+                   help="engine clone with origin/develop (default: $TCR_ENGINE_REPO)")
     s.add_argument("--offline", action="store_true", help="skip the Jira read")
     s.add_argument("--no-context", action="store_true", help="skip the testcase view")
     s.set_defaults(func=cmd_check)

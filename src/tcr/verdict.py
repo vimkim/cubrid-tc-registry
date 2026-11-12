@@ -14,7 +14,6 @@ from datetime import date
 from . import stack
 
 JIRA_URL = "https://jira.cubrid.org/rest/api/2/issue/{key}?fields=status,resolution"
-DEFAULT_ENGINE_REPO = "/home/vimkim/gh/cb/develop"
 FIX_REF = "origin/develop"
 
 VERDICTS = ("no_match", "expired", "known", "fix_missing", "fix_present", "unknown")

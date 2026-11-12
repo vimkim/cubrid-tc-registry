@@ -28,7 +28,7 @@ The design is `docs/testcase-registry-design.md` in `my-cubrid-skills`.
 
 `CASE` is a full testcase path, or a fragment that `cubrid-tcc find` resolves to exactly one testcase.
 
-`check` reads Jira anonymously (`/rest/api/2/issue/<KEY>?fields=status,resolution`) and reads Git in `--engine-repo`, which defaults to `/home/vimkim/gh/cb/develop`. It does not fetch. A stale `origin/develop` there can hide a fix commit.
+`check` reads Jira anonymously (`/rest/api/2/issue/<KEY>?fields=status,resolution`) and reads Git in `--engine-repo`, which defaults to `$TCR_ENGINE_REPO`. Without `--offline`, `check` stops with code 2 when neither names a Git checkout. It does not fetch. A stale `origin/develop` there can hide a fix commit.
 
 Every command exits with code 0 for any verdict and with code 2 for an operational error. Repeating a write command reports `unchanged`.
 

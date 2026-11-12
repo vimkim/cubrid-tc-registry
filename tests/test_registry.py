@@ -5,7 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, date, datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -235,8 +235,10 @@ class CliTest(unittest.TestCase):
         exe = d / "cubrid-tcc"
         exe.write_text(FAKE_TCC.replace("/usr/bin/env python3", sys.executable))
         exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
+        (d / "engine" / ".git").mkdir(parents=True)
         self.env = {"PATH": f"{d}{os.pathsep}{os.environ['PATH']}",
-                    "TCR_DB": str(d / "r.sqlite3"), "TCR_ACTOR": "tester"}
+                    "TCR_DB": str(d / "r.sqlite3"), "TCR_ACTOR": "tester",
+                    "TCR_ENGINE_REPO": str(d / "engine")}
         self.old = {k: os.environ.get(k) for k in self.env}
         os.environ.update(self.env)
 
@@ -287,6 +289,19 @@ class CliTest(unittest.TestCase):
         self.assertEqual(other["verdict"], "no_match")
         job = self.run_cli("check", "--job", "shard sql_by_cci 01", "--engine", "cd24a21")
         self.assertEqual(job["verdict"], "known")
+
+    def test_check_without_engine_repo_stops(self):
+        os.environ.pop("TCR_ENGINE_REPO")
+        with self.assertRaises(SystemExit) as stopped, redirect_stderr(StringIO()) as err:
+            cli.main(["check", "--job", "shard sql_by_cci 01", "--engine", "cd24a21"])
+        self.assertEqual(stopped.exception.code, 2)
+        self.assertIn("TCR_ENGINE_REPO", err.getvalue())
+        missing = str(Path(self.tmp.name) / "absent")
+        with self.assertRaises(SystemExit), redirect_stderr(StringIO()) as err:
+            cli.main(["check", "--job", "x", "--engine", "cd24a21", "--engine-repo", missing])
+        self.assertIn("not a Git checkout", err.getvalue())
+        offline = self.run_cli("check", "--job", "x", "--engine", "cd24a21", "--offline")
+        self.assertEqual(offline["verdict"], "no_match")
 
 
 if __name__ == "__main__":
