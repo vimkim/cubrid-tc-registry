@@ -1,6 +1,7 @@
 """Read testcase identity and failure history from Chronicle (`cubrid-tcc`)."""
 
 import json
+import shlex
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -57,10 +58,7 @@ def occurrence(o: dict) -> dict:
     }
 
 
-def sync_hint(status: dict, suite: str, today: str) -> str | None:
-    fresh = status.get("freshness") or {}
-    if not fresh.get("needs_refresh"):
-        return None
-    since = (fresh.get("discovery_through") or "")[:10] or today
-    return (f"cubrid-tcc sync-data --since {since} --until {today} --suite {suite}"
-            " --revisit-limit 0 --json")
+def sync_hint(status: dict) -> str | None:
+    """Chronicle's own refresh command for this testcase, or None when nothing a sync clears."""
+    argv = (status.get("freshness") or {}).get("suggested_sync")
+    return shlex.join(argv) if argv else None

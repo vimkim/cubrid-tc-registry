@@ -399,7 +399,10 @@ elif cmd == "history":
         occ(42000000000, "PASS", "2026-11-09T22:37:55Z", "develop")]}))
 elif cmd == "status":
     print(json.dumps({"status": "FAILING", "freshness": {"state": "STALE",
-        "needs_refresh": True, "discovery_through": "2026-10-27T12:20:00Z"}}))
+        "needs_refresh": True, "discovery_through": "2026-10-27T12:20:00Z",
+        "suggested_sync": ["cubrid-tcc", "sync-data", "--since", "2026-10-27T12:20:00Z",
+                           "--until", "2026-11-12T00:00:00Z", "--suite", "shell",
+                           "--revisit-limit", "0"]}}))
 """.replace("__CASE__", CASE)
 
 
@@ -454,7 +457,8 @@ class CliTest(CliBase):
         self.assertEqual(h["all_failures"]["by_branch"], {"feature/oos-merge": 1})
         self.assertEqual(h["failures"][0]["signature"], "vacuum")
         self.assertEqual(h["pass_count"], 1)
-        self.assertIn("--since 2026-10-27", h["sync_hint"])
+        self.assertEqual(h["sync_hint"], "cubrid-tcc sync-data --since 2026-10-27T12:20:00Z"
+                         " --until 2026-11-12T00:00:00Z --suite shell --revisit-limit 0")
         self.assertEqual([link["relation"] for link in shown["links"]], ["tracks"])
 
         offline = self.run_cli("check", "--case", "cbrd_27179", "--engine", "cd24a21",

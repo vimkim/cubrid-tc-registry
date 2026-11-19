@@ -63,7 +63,7 @@ def build(store, tc, *, days=None, show_all=False, now=None, fetched=None) -> di
             status=status.get("status"),
             freshness=fresh.get("state"),
             discovery_through=fresh.get("discovery_through"),
-            sync_hint=chronicle.sync_hint(status, tc.suite, now.date().isoformat()),
+            sync_hint=chronicle.sync_hint(status),
         )
     shown, older, mode = window(failures, days=days, show_all=show_all, now=now)
     history.update(
