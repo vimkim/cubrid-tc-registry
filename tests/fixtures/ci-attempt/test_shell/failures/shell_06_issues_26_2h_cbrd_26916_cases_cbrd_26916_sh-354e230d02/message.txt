@@ -1,0 +1,83 @@
+---- cub_manager.err (this case) ----
+ : NOK found core file on host 10.233.111.17(/home/ERROR_BACKUP/AUTO_11.5.0.2925-fbb4f25_20261112_210400)
+<!--HTMLESCAPESTART--><a class=SHELLCORE href="javascript:reportShellCoreIssue('/home/cubrid-testcases-private-ex/shell/_06_issues/_26_2h/cbrd_26916/cases/core.50535', 'AUTO_11.5.0.2925-fbb4f25_20261112_210400', '10.233.111.17', 'null', 'root', '11.5.0.2925-fbb4f25', ' SUMMARY : [Core dumped in aj_execquery_get_exec_time at src/cm_autojob.cpp:1204]' ) "><i><font color=red>REPORT ISSUE FOR BELOW CRASH</font></i></a><!--HTMLESCAPEEND-->
+=================================== CORE ANALYZER ===================================
+	CORE FILE   : [/home/cubrid-testcases-private-ex/shell/_06_issues/_26_2h/cbrd_26916/cases/core.50535]
+	HOME        : [/home]
+	JAVA_HOME   : [/usr/lib/jvm/java-1.8.0]
+	PROCESS NAME: [cub_manager]
+	SUMMARY     : [Core dumped in aj_execquery_get_exec_time at src/cm_autojob.cpp:1204]
+	DETAIL STACK:
+--------------------------------------------------------
+#0  0x000000000041c392 in aj_execquery_get_exec_time (
+    prev_check_time=<optimized out>, exec_tm=0x7fc0f77ed1e0, 
+    d=0x7fc0dc00b680, c=0x7fc0dc002820)
+    at /__w/cubrid/cubrid/cubrid/cubridmanager/server/src/cm_autojob.cpp:1204
+#1  aj_execquery_handler (hd=<optimized out>, prev_check_time=1794484896, 
+    cur_time=<optimized out>)
+    at /__w/cubrid/cubrid/cubrid/cubridmanager/server/src/cm_autojob.cpp:1099
+#2  0x000000000044868a in aj_thread_r (aj=0xca8a60 <aj_tinfo>)
+    at /__w/cubrid/cubrid/cubrid/cubridmanager/server/src/cm_httpd.cpp:816
+#3  0x00007fc1092381ca in start_thread () from /lib64/libpthread.so.0
+#4  0x00007fc1089be7d3 in clone () from /lib64/libc.so.6
+--------------------------------------------------------
+	STACK DIGEST:
+#0	aj_execquery_get_exec_time	src/cm_autojob.cpp
+#1	aj_execquery_handler	src/cm_autojob.cpp
+#2	aj_thread_r	src/cm_httpd.cpp
+#3	start_thread	<EXTERNAL LIBRARY>
+#4	clone	<EXTERNAL LIBRARY>
+<END>
+==> Skip common properties initialization
+21:04:58----/home/cubrid-testcases-private-ex/shell/_06_issues/_26_2h/cbrd_26916/cases--- time=203
+============================= CONSOLE OUTPUT =============================
+++ begin_time=0
+++ end_time=0
+++ need_count_time=1
+++ cubrid_major=
+++ cubrid_minor=
+++ IGNORE_TEST_PERFORMANCE=
+++ '[' '!' -n en_US ']'
++++ get_os
+++++ uname
++++ osname=Linux
++++ case "$osname" in
++++ echo Linux
+++ export OS=Linux
+++ OS=Linux
+++ '[' Linux = Windows_NT ']'
+++ source /home/cubrid-testtools/CTP/shell/init_path/shell_utils.sh
++ init test
+++ date
++ echo '[INFO] TEST START (Thu Nov 12 21:01:35 KST 2026)'
+[INFO] TEST START (Thu Nov 12 21:01:35 KST 2026)
+++ pwd
++ cur_path=/home/cubrid-testcases-private-ex/shell/_06_issues/_26_2h/cbrd_26916/cases
++ cd /home/cubrid-testcases-private-ex/shell/_06_issues/_26_2h/cbrd_26916/cases
++ case_no=1
++ full_name=cbrd_26916.sh
++ answer_no=1
++ mode=test
++ '[' 1 -eq 1 ']'
+++ get_curr_second
++++ date +%s
+++ str=1794484895
+++ echo 1794484895
++ begin_time=1794484895
+++ date +%Y-%m-%d
++ date_str=2026-11-12
+++ date +%H:%M:%S
++ time_str=21:01:35
++ echo 21:01:35----/home/cubrid-testcases-private-ex/shell/_06_issues/_26_2h/cbrd_26916/cases---- test start
+/home/cubrid-testtools/CTP/shell/init_path/init.sh: line 768: /home/cubrid-testcases-private-ex/shell/_06_issues/_26_2h/cbrd_26916/cases/: Is a directory
++ '[' Linux = Windows_NT ']'
++ export REAL_INIT_PATH=/home/cubrid-testtools/CTP/shell/init_path
++ REAL_INIT_PATH=/home/cubrid-testtools/CTP/shell/init_path
+++ cubrid_rel
+++ grep 32bit
+++ wc -l
++ is_cubrid_32bits=0
++ '[' 0 == 1 ']'
++ CUBRID_BITS=64
++ export CUBRID_BITS
++ rm -rf /home/CUBRID/log/manager /home/CUBRID/log/pl /home/CUBRID/log/server

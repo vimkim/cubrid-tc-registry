@@ -37,13 +37,16 @@ def summarize(failures: list[dict]) -> dict:
     }
 
 
-def build(store, tc, *, days=None, show_all=False, now=None) -> dict:
+def build(store, tc, *, days=None, show_all=False, now=None, fetched=None) -> dict:
+    """`fetched` is a (history, status) pair or a ChronicleError already read for this testcase."""
     now = now or datetime.now(UTC)
     tags = store.occurrence_tags(tc)
     history = {"available": True}
     failures, passes = [], 0
     try:
-        hist, status = chronicle.history_and_status(tc.path, tc.suite)
+        if isinstance(fetched, Exception):
+            raise fetched
+        hist, status = fetched or chronicle.history_and_status(tc.path, tc.suite)
     except chronicle.ChronicleError as e:
         history = {"available": False, "reason": str(e)}
     else:

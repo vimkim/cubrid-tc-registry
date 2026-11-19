@@ -1,0 +1,12 @@
+{
+  "schema_version": 2,
+  "stable_id": "shell_06_issues_26_2h_cbrd_26916_cases_cbrd_26916_sh-354e230d02",
+  "name": "shell/_06_issues/_26_2h/cbrd_26916/cases/cbrd_26916.sh",
+  "shard": "15",
+  "class_name": "shell/_06_issues/_26_2h/cbrd_26916/cases",
+  "duration_seconds": 204.663,
+  "result": "error",
+  "diff_extraction": "extracted",
+  "message_path": "failures/shell_06_issues_26_2h_cbrd_26916_cases_cbrd_26916_sh-354e230d02/message.txt",
+  "diff_path": "failures/shell_06_issues_26_2h_cbrd_26916_cases_cbrd_26916_sh-354e230d02/diff.txt"
+}

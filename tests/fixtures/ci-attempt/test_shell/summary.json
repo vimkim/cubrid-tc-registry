@@ -1,0 +1,81 @@
+{
+ "schema_version": 2,
+ "suite": "test_shell",
+ "ci_state": "failure",
+ "collection_state": "complete",
+ "run_id": 43197154411,
+ "attempt": 1,
+ "shards": [
+  {
+   "index": "08",
+   "build": {
+    "sha": "fbb4f250576a1d39a5202ab2b5ddb9965560d6f1",
+    "mode": "debug",
+    "namespace": "pr",
+    "run_id": 43168210212,
+    "run_attempt": 1
+   },
+   "testcases": {
+    "sha": "c2de1289444c5f1682e35aabd39580d489e5670f",
+    "branch": "tc/pr-8494"
+   },
+   "junit_files": [
+    "linux_shell_64bit_optdebug.xml"
+   ]
+  },
+  {
+   "index": "15",
+   "build": {
+    "sha": "fbb4f250576a1d39a5202ab2b5ddb9965560d6f1",
+    "mode": "debug",
+    "namespace": "pr",
+    "run_id": 43168210212,
+    "run_attempt": 1
+   },
+   "testcases": {
+    "sha": "c2de1289444c5f1682e35aabd39580d489e5670f",
+    "branch": "tc/pr-8494"
+   },
+   "junit_files": [
+    "linux_shell_64bit_optdebug.xml"
+   ]
+  },
+  {
+   "index": "17",
+   "build": {
+    "sha": "fbb4f250576a1d39a5202ab2b5ddb9965560d6f1",
+    "mode": "debug",
+    "namespace": "pr",
+    "run_id": 43168210212,
+    "run_attempt": 1
+   },
+   "testcases": {
+    "sha": "c2de1289444c5f1682e35aabd39580d489e5670f",
+    "branch": "tc/pr-8494"
+   },
+   "junit_files": [
+    "linux_shell_64bit_optdebug.xml"
+   ]
+  }
+ ],
+ "failures": [
+  {
+   "stable_id": "shell_06_issues_26_2h_cbrd_25862_cms_cases_cbrd_25862_cms_sh-7d43883025",
+   "name": "shell/_06_issues/_26_2h/cbrd_25862_cms/cases/cbrd_25862_cms.sh",
+   "shard": "08",
+   "result": "failure"
+  },
+  {
+   "stable_id": "shell_06_issues_26_2h_cbrd_26916_cases_cbrd_26916_sh-354e230d02",
+   "name": "shell/_06_issues/_26_2h/cbrd_26916/cases/cbrd_26916.sh",
+   "shard": "15",
+   "result": "error"
+  },
+  {
+   "stable_id": "shell_06_issues_26_2h_cbrd_26861_cases_cbrd_26861_sh-d9f79c7a94",
+   "name": "shell/_06_issues/_26_2h/cbrd_26861/cases/cbrd_26861.sh",
+   "shard": "17",
+   "result": "failure"
+  }
+ ]
+}

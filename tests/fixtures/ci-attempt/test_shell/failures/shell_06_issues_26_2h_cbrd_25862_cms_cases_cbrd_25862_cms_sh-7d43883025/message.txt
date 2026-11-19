@@ -1,0 +1,15 @@
+
+EnvIdentify: EnvId=local[parallel-08]
+Hostname: cubrid-arc-586zc-runner-d9jgc-workflow
+cbrd_25862_cms-1 : NOK
+  [sa_dba] SA mode, dbuser dba
+  expected status    : success     actual : failure
+  expected authority : isdba     actual : none
+  actual note        : In line 1, column 101,<end>ERROR: before ' .name}), SET{}) from db_user u, TABLE(groups) AS t( g ) WHERE...'<end>t.g is a varchar type, not an object type.<end>
+---- payload sent ----
+{
+   "task":"dbmtuserlogin",
+   "targetid":"admin",
+   "dbname":"db25862cms",
+   "dbuser":"dba",
+   "dbpasswd":""

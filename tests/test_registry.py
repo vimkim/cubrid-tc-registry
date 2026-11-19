@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -228,7 +229,7 @@ elif cmd == "status":
 """.replace("__CASE__", CASE)
 
 
-class CliTest(unittest.TestCase):
+class CliBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         d = Path(self.tmp.name)
@@ -256,6 +257,8 @@ class CliTest(unittest.TestCase):
             cli.main(["--json", *argv])
         return json.loads(buf.getvalue())
 
+
+class CliTest(CliBase):
     def test_migrated_records_drive_show_and_check(self):
         stack_file = str(FIXTURES / "reconstructed-cbrd_27179.txt")
         self.run_cli("signature", "add", "cbrd_27179", "--id", "vacuum", "--label", "l",
@@ -320,6 +323,134 @@ class CliTest(unittest.TestCase):
         self.assertIn("not a Git checkout", err.getvalue())
         offline = self.run_cli("check", "--job", "x", "--engine", "cd24a21", "--offline")
         self.assertEqual(offline["verdict"], "no_match")
+
+
+CORE_CASE = "shell/_06_issues/_26_2h/cbrd_26916/cases/cbrd_26916.sh"
+CORE_FRAMES = ["aj_execquery_get_exec_time", "aj_execquery_handler", "aj_thread_r"]
+ATTEMPT = FIXTURES / "ci-attempt" / "test_shell"
+# Every `history` call is logged, so a test can count them.
+ATTEMPT_TCC = """#!/usr/bin/env python3
+import json, sys
+cmd, path = sys.argv[1], sys.argv[2]
+if cmd == "history":
+    open("__LOG__", "a").write(path + "\\n")
+    occ = lambda shard, out: {"repository": "CUBRID/cubrid", "run_id": 43197154411,
+        "attempt": 1, "shard": shard, "ordinal": 0, "outcome": out,
+        "completed_at": "2026-11-12T22:00:00Z", "engine_sha": "fbb4f250576a",
+        "build_mode": "debug", "pull_request": {"number": 8494, "base_ref": "develop"}}
+    print(json.dumps({"occurrences": [occ("15", "ERROR"), occ("17", "ERROR")]}))
+elif cmd == "status":
+    print(json.dumps({"status": "FAILING", "freshness": {"state": "FRESH"}}))
+"""
+
+
+class CiAttemptTest(CliBase):
+    def setUp(self):
+        super().setUp()
+        d = Path(self.tmp.name)
+        self.log = d / "history.log"
+        exe = d / "cubrid-tcc"
+        exe.write_text(ATTEMPT_TCC.replace("__LOG__", str(self.log))
+                       .replace("/usr/bin/env python3", sys.executable))
+        self.attempt = d / "test_shell"
+        shutil.copytree(ATTEMPT, self.attempt)
+
+    def calls(self):
+        return self.log.read_text().split() if self.log.exists() else []
+
+    def by_path(self, out):
+        return {f["identity"]["path"]: f for f in out["failures"]}
+
+    def test_every_failure_is_checked_with_case_and_job_rules(self):
+        self.run_cli("signature", "add", CORE_CASE, "--id", "manager-core", "--label", "l",
+                     "--frames", ",".join(CORE_FRAMES))
+        for args in (["--id", "r", "--signature", "manager-core", "--expires", "2099-01-01"],
+                     ["--id", "job", "--job-contains", "shard shell 17",
+                      "--expires", "2099-01-01"]):
+            self.run_cli("rule", "add", *args, "--not-covered", "-", "--yes",
+                         "--approved-by", "user")
+        out = self.run_cli("check", "--ci-attempt", str(self.attempt), "--offline")
+        self.assertEqual((out["suite"], out["run"], out["attempt"], out["failure_count"]),
+                         ("test_shell", 43197154411, 1, 3))
+        self.assertEqual(out["verdicts"], {"known": 2, "no_match": 1})
+        core = self.by_path(out)[CORE_CASE]
+        self.assertEqual(core["identity"], {
+            "suite": "test_shell", "path": CORE_CASE, "run": 43197154411, "attempt": 1,
+            "shard": "15", "job": "shard shell 15",
+            "engine_sha": "fbb4f250576a1d39a5202ab2b5ddb9965560d6f1"})
+        self.assertEqual((core["verdict"], core["stack_found"]), ("known", True))
+        self.assertEqual(core["hits"][0]["rule_id"], "r")
+        self.assertEqual(core["history"]["failures"], 2)
+        jobbed = self.by_path(out)["shell/_06_issues/_26_2h/cbrd_26861/cases/cbrd_26861.sh"]
+        self.assertEqual((jobbed["verdict"], jobbed["hits"][0]["rule_id"]), ("known", "job"))
+        self.assertFalse(jobbed["stack_found"])
+        self.assertTrue(all("record" not in f for f in out["failures"]))
+
+    def test_history_is_read_once_per_testcase(self):
+        data = json.loads((self.attempt / "summary.json").read_text())
+        twin = dict(data["failures"][1], shard="17", stable_id="twin")
+        data["failures"].append(twin)
+        data["shards"].append(dict(data["shards"][0], index="17"))
+        (self.attempt / "summary.json").write_text(json.dumps(data))
+        folder = self.attempt / "failures" / "twin"
+        shutil.copytree(self.attempt / "failures" / data["failures"][1]["stable_id"], folder)
+        meta = json.loads((folder / "metadata.json").read_text())
+        (folder / "metadata.json").write_text(json.dumps(meta | {"shard": "17"}))
+        out = self.run_cli("check", "--ci-attempt", str(self.attempt), "--offline")
+        self.assertEqual(out["failure_count"], 4)
+        self.assertEqual(sorted(self.calls()), sorted({f["identity"]["path"]
+                                                       for f in out["failures"]}))
+
+    def test_record_attaches_only_the_single_match(self):
+        self.run_cli("signature", "add", CORE_CASE, "--id", "manager-core", "--label", "l",
+                     "--frames", ",".join(CORE_FRAMES))
+        argv = ["check", "--ci-attempt", str(self.attempt), "--offline"]
+        self.run_cli(*argv)
+        self.assertEqual(self.run_cli("log")[0]["command"], "signature add")
+        out = self.run_cli(*argv, "--record")
+        recs = {f["identity"]["shard"]: f["record"] for f in out["failures"]}
+        self.assertEqual(recs["15"], {"result": "added", "signature": "manager-core"})
+        self.assertEqual(recs["17"]["result"], "no_stack")
+        again = self.by_path(self.run_cli(*argv, "--record"))[CORE_CASE]
+        self.assertEqual(again["record"]["result"], "unchanged")
+        self.assertEqual(len([e for e in self.run_cli("log") if e["command"] ==
+                              "signature attach"]), 1)
+        shown = self.run_cli("show", CORE_CASE)
+        self.assertEqual(shown["history"]["all_failures"]["by_signature"],
+                         {"manager-core": 1, "unknown": 1})
+
+    def test_by_cci_has_no_history_and_uses_job_rules(self):
+        self.run_cli("rule", "add", "--id", "cci", "--job-contains", "shard sql_by_cci 15",
+                     "--expires", "2099-01-01", "--not-covered", "-", "--yes",
+                     "--approved-by", "user")
+        data = json.loads((self.attempt / "summary.json").read_text())
+        (self.attempt / "summary.json").write_text(
+            json.dumps(data | {"suite": "test_sql_by_cci"}))
+        out = self.run_cli("check", "--ci-attempt", str(self.attempt), "--offline", "--record")
+        self.assertEqual(self.calls(), [])
+        core = self.by_path(out)[CORE_CASE]
+        self.assertEqual((core["verdict"], core["hits"][0]["rule_id"]), ("known", "cci"))
+        self.assertFalse(core["history"]["available"])
+        self.assertIn("no Chronicle suite", core["history"]["reason"])
+        self.assertNotIn("record", core)
+
+    def test_unknown_schema_version_exits_2(self):
+        for name in ("summary.json", "failures/*/metadata.json"):
+            shutil.rmtree(self.attempt)
+            shutil.copytree(ATTEMPT, self.attempt)
+            target = next(self.attempt.glob(name))
+            data = json.loads(target.read_text()) | {"schema_version": 3}
+            target.write_text(json.dumps(data))
+            with self.assertRaises(SystemExit) as stopped, redirect_stderr(StringIO()) as err:
+                cli.main(["check", "--ci-attempt", str(self.attempt), "--offline"])
+            self.assertEqual(stopped.exception.code, 2)
+            self.assertIn("schema_version 3", err.getvalue())
+
+    def test_options_are_validated(self):
+        for argv in (["--case", "x", "--offline", "--record"], ["--case", "x", "--offline"]):
+            with self.assertRaises(SystemExit) as stopped, redirect_stderr(StringIO()):
+                cli.main(["check", *argv])
+            self.assertEqual(stopped.exception.code, 2)
 
 
 if __name__ == "__main__":

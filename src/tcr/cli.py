@@ -5,10 +5,11 @@ import getpass
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from . import __version__, chronicle, stack, verdict, view
+from . import __version__, attempt, chronicle, stack, verdict, view
 from .store import RELATIONS, SUITE_REPOSITORY, RegistryError, Store, Testcase, default_path
 
 EPILOG = """\
@@ -16,6 +17,7 @@ examples:
   cubrid-tcr show cbrd_27179
   cubrid-tcr check --case cbrd_27179 --suite shell --engine cd24a21 --stack-file core.txt
   cubrid-tcr check --job "shard sql_by_cci 01" --engine cd24a21
+  cubrid-tcr check --ci-attempt ~/.local/share/cubrid-ci-data/.../attempts/1/test_shell --record
   cubrid-tcr note cbrd_27179 --suite shell --body "Also failed on PR #8404"
 """
 
@@ -64,32 +66,49 @@ def cmd_show(args, store):
     emit(args, v, view.render(v))
 
 
+def _hits(store, rules, *, job, stack_text, engine, engine_repo, offline, cache):
+    """Evaluate rules for one failure. `cache` holds Jira and fix reads shared by a batch."""
+    today = date.today()
+    hits = []
+    for rule in rules:
+        sig = store.signature(rule["signature_id"]) if rule["signature_id"] else None
+        scope = verdict.scope_matches(rule, job=job, stack_text=stack_text, signature=sig)
+        issue = fix = None
+        if scope == "match" and rule["issue"]:
+            if not offline:
+                key = ("issue", rule["issue"])
+                if key not in cache:
+                    cache[key] = verdict.read_issue(rule["issue"])
+                issue = cache[key]
+            if issue and issue.resolution == "Fixed":
+                key = ("fix", rule["issue"], engine)
+                if key not in cache:
+                    cache[key] = verdict.read_fix(rule["issue"], engine, engine_repo)
+                fix = cache[key]
+        h = verdict.decide(rule, scope, today, issue, fix)
+        if h:
+            hits.append(h)
+    return hits
+
+
 def cmd_check(args, store):
-    stack_text = Path(args.stack_file).read_text(errors="replace") if args.stack_file else None
+    if args.record and not args.ci_attempt:
+        raise RegistryError("--record works only with --ci-attempt")
+    if not args.ci_attempt and not args.engine:
+        raise RegistryError("--engine is required with --case or --job")
     if not args.offline:
         _require_engine_repo(args.engine_repo)
+    if args.ci_attempt:
+        return check_attempt(args, store)
+    stack_text = Path(args.stack_file).read_text(errors="replace") if args.stack_file else None
     tc = None
     if args.case:
         tc = resolve(store, args.case, args.suite, create=False)
         rules = store.rules(tc=tc)
     else:
         rules = store.job_rules()
-    today = date.today()
-    hits, issue_cache = [], {}
-    for rule in rules:
-        sig = store.signature(rule["signature_id"]) if rule["signature_id"] else None
-        scope = verdict.scope_matches(rule, job=args.job, stack_text=stack_text, signature=sig)
-        issue = fix = None
-        if scope == "match" and rule["issue"]:
-            if not args.offline:
-                if rule["issue"] not in issue_cache:
-                    issue_cache[rule["issue"]] = verdict.read_issue(rule["issue"])
-                issue = issue_cache[rule["issue"]]
-            if issue and issue.resolution == "Fixed":
-                fix = verdict.read_fix(rule["issue"], args.engine, args.engine_repo)
-        h = verdict.decide(rule, scope, today, issue, fix)
-        if h:
-            hits.append(h)
+    hits = _hits(store, rules, job=args.job, stack_text=stack_text, engine=args.engine,
+                 engine_repo=args.engine_repo, offline=args.offline, cache={})
     result = {
         "verdict": _overall(hits),
         "hits": [h.as_dict() for h in hits],
@@ -107,6 +126,105 @@ def cmd_check(args, store):
     if "context" in result:
         lines += ["", view.render(result["context"])]
     emit(args, result, "\n".join(lines))
+
+
+def check_attempt(args, store):
+    """Check every failure of one collected CI attempt suite."""
+    bundle = attempt.load(args.ci_attempt)
+    failures = bundle["failures"]
+    keys = sorted({(f["suite"], f["path"]) for f in failures
+                   if attempt.CHRONICLE_SUITE[f["suite"]]})
+    # One testcase view per testcase, even when it failed in several shards. tcc is the slow part.
+    tcs = {k: resolve(store, k[1], attempt.CHRONICLE_SUITE[k[0]], create=False) for k in keys}
+
+    def fetch(k):
+        try:
+            return chronicle.history_and_status(tcs[k].path, tcs[k].suite)
+        except chronicle.ChronicleError as e:
+            return e
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        fetched = dict(zip(keys, pool.map(fetch, keys), strict=True))
+    views = {k: view.build(store, tcs[k], fetched=fetched[k]) for k in keys}
+    cache, entries = {}, []
+    for f in failures:
+        k = (f["suite"], f["path"])
+        job = f"shard {f['suite'].removeprefix('test_')} {f['shard']}"
+        stacks = stack.parse_stacks(f["message"])
+        stack_text = f["message"] if stacks else None
+        rules = store.job_rules()
+        if k in tcs:
+            rules = store.rules(tc=tcs[k]) + rules
+        hits = _hits(store, rules, job=job, stack_text=stack_text, engine=f["engine_sha"],
+                     engine_repo=args.engine_repo, offline=args.offline, cache=cache)
+        overall = _overall(hits)
+        winner = next((h for h in hits if h.verdict == overall), None)
+        entry = {
+            "identity": {"suite": f["suite"], "path": f["path"], "run": f["run"],
+                         "attempt": f["attempt"], "shard": f["shard"],
+                         "engine_sha": f["engine_sha"], "job": job},
+            "verdict": overall,
+            "hits": [h.as_dict() for h in hits],
+            "reason": winner.reason if winner else "no rule matched",
+            "stack_found": stack_text is not None,
+            "history": _history_counts(views.get(k)),
+        }
+        if args.record and k in tcs:
+            entry["record"] = _record(store, tcs[k], fetched[k], f, stack_text)
+        entries.append(entry)
+    counts = {}
+    for e in entries:
+        counts[e["verdict"]] = counts.get(e["verdict"], 0) + 1
+    result = {**bundle["header"], "failure_count": len(entries), "verdicts": counts,
+              "failures": entries}
+    lines = [f"{result['suite']} run {result['run']} attempt {result['attempt']}: "
+             f"{len(entries)} failures, " + (_counts_text(counts) or "none")]
+    for e in entries:
+        i, h = e["identity"], e["history"]
+        past = (f"{h['failures']} failures, {h['passes']} passes"
+                if h["available"] else h["reason"])
+        lines.append(f"  {e['verdict']:11} shard {i['shard']} {i['path']} ({past})")
+        lines.append(f"              {e['reason']}"
+                     + (f" [record: {e['record']['result']}]" if "record" in e else ""))
+    emit(args, result, "\n".join(lines))
+
+
+def _counts_text(counts):
+    return ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+
+
+def _history_counts(v):
+    if v is None:
+        return {"available": False,
+                "reason": "test_sql_by_cci has no Chronicle suite; history skipped"}
+    h = v["history"]
+    if not h["available"]:
+        return {"available": False, "reason": h["reason"]}
+    a = h["all_failures"]
+    return {"available": True, "failures": a["count"], "passes": h["pass_count"],
+            "first": a["first"], "last": a["last"], "by_branch": a["by_branch"],
+            "by_signature": a["by_signature"]}
+
+
+def _record(store, tc, fetched, f, stack_text):
+    """Attach the one signature that matches. Anything else writes nothing."""
+    if stack_text is None:
+        return {"result": "no_stack"}
+    cands = [s["id"] for s in store.signatures(tc)
+             if stack.matches(stack_text, s["frames"], s["required_text"])]
+    if len(cands) != 1:
+        return {"result": "no_single_match", "candidates": cands}
+    if isinstance(fetched, Exception):
+        return {"result": "no_occurrence", "reason": str(fetched)}
+    found = [chronicle.occurrence(o) for o in fetched[0].get("occurrences", [])]
+    shard = f["shard"].lstrip("0")
+    found = [o for o in found if o["run_id"] == f["run"] and o["attempt"] in (0, f["attempt"])
+             and o["shard"].lstrip("0") == shard and o["outcome"] in chronicle.FAILED]
+    if len(found) != 1:
+        return {"result": "no_occurrence", "reason": f"Chronicle has {len(found)} failed "
+                f"occurrences for run {f['run']} shard {f['shard']}; sync the run first"}
+    r = store.attach(tc, found[0], cands[0], stack.digest(stack_text))
+    return {"result": r, "signature": cands[0]}
 
 
 def _require_engine_repo(repo):
@@ -283,12 +401,18 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--all", action="store_true", help="list every indexed failure")
     s.set_defaults(func=cmd_show)
 
-    s = add(sub, "check", help="decide whether one failure is a known issue")
+    s = add(sub, "check", help="decide whether failures are known issues")
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument("--case")
     g.add_argument("--job", help="CI job name, for a job-level failure")
+    g.add_argument("--ci-attempt", metavar="DIR",
+                   help="check every failure of one suite directory collected by cubrid-ci"
+                        " (reads summary.json and failures/*; engine SHA comes from the shard)")
     s.add_argument("--suite", choices=sorted(SUITE_REPOSITORY))
-    s.add_argument("--engine", required=True, help="tested Engine commit")
+    s.add_argument("--engine", help="tested Engine commit (--case and --job)")
+    s.add_argument("--record", action="store_true",
+                   help="with --ci-attempt, attach a signature to each occurrence that matches"
+                        " exactly one; without it nothing is written")
     s.add_argument("--stack-file", help="core backtrace text")
     s.add_argument("--engine-repo", default=os.environ.get("TCR_ENGINE_REPO"),
                    help="engine clone with origin/develop (default: $TCR_ENGINE_REPO)")

@@ -1,0 +1,15 @@
+
+EnvIdentify: EnvId=local[parallel-17]
+Hostname: cubrid-arc-586zc-runner-stg8s-workflow
+cbrd_26861-1 : NOK
+  [case1] async backupdb db26861b: expected status success, job-status running, a quoted numeric uuid
+---- case1.out ----
+{
+   "__EXEC_TIME" : "1652 ms",
+   "note" : "none",
+   "status" : "success",
+   "task" : "backupdb"
+}
+cbrd_26861-2 : NOK
+  [case2] gettaskstatus  again: expected the same finished result
+---- case2.out ----
