@@ -290,6 +290,24 @@ class CliTest(unittest.TestCase):
         job = self.run_cli("check", "--job", "shard sql_by_cci 01", "--engine", "cd24a21")
         self.assertEqual(job["verdict"], "known")
 
+    def test_global_options_work_after_the_command(self):
+        db = str(Path(self.tmp.name) / "other.sqlite3")
+        argv = ["rule", "add", "--id", "cci", "--job-contains", "sql_by_cci",
+                "--expires", "2099-01-01", "--not-covered", "-", "--yes",
+                "--approved-by", "user", "--database", db, "--actor", "late"]
+        with redirect_stdout(StringIO()):
+            cli.main(argv)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            cli.main(["check", "--job", "shard sql_by_cci 01", "--engine", "cd24a21",
+                      "--offline", "--database", db, "--json"])
+        self.assertEqual(json.loads(buf.getvalue())["verdict"], "known")
+        buf = StringIO()
+        with redirect_stdout(buf):
+            cli.main(["--database", db, "--json", "log"])
+        self.assertEqual(json.loads(buf.getvalue())[0]["actor"], "late")
+        self.assertFalse(Path(os.environ["TCR_DB"]).exists())
+
     def test_check_without_engine_repo_stops(self):
         os.environ.pop("TCR_ENGINE_REPO")
         with self.assertRaises(SystemExit) as stopped, redirect_stderr(StringIO()) as err:

@@ -251,11 +251,24 @@ def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="cubrid-tcr", description=__doc__, epilog=EPILOG,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"cubrid-tcr {__version__}")
-    p.add_argument("--database", type=Path,
-                   help=f"SQLite path (default {default_path()}, env TCR_DB)")
-    p.add_argument("--actor", default=os.environ.get("TCR_ACTOR") or getpass.getuser(),
-                   help="who writes, recorded in the event log (env TCR_ACTOR)")
-    p.add_argument("--json", action="store_true", help="print JSON")
+
+    def global_options(target, default):
+        target.add_argument("--database", type=Path, default=default(None),
+                            help=f"SQLite path (default {default_path()}, env TCR_DB)")
+        target.add_argument("--actor",
+                            default=default(os.environ.get("TCR_ACTOR") or getpass.getuser()),
+                            help="who writes, recorded in the event log (env TCR_ACTOR)")
+        target.add_argument("--json", action="store_true", default=default(False),
+                            help="print JSON")
+
+    global_options(p, lambda value: value)
+    # The same options after the command. SUPPRESS keeps a value given before the command.
+    common = argparse.ArgumentParser(add_help=False)
+    global_options(common, lambda value: argparse.SUPPRESS)
+
+    def add(subparsers, name, **kwargs):
+        return subparsers.add_parser(name, parents=[common], **kwargs)
+
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
     def case_args(sp, required=True):
@@ -263,14 +276,14 @@ def parser() -> argparse.ArgumentParser:
                         help="full testcase path, or a fragment Chronicle resolves")
         sp.add_argument("--suite", choices=sorted(SUITE_REPOSITORY))
 
-    s = sub.add_parser("show", help="everything known about one testcase")
+    s = add(sub, "show", help="everything known about one testcase")
     case_args(s)
     g = s.add_mutually_exclusive_group()
     g.add_argument("--days", type=int, help="list only failures of the last N days")
     g.add_argument("--all", action="store_true", help="list every indexed failure")
     s.set_defaults(func=cmd_show)
 
-    s = sub.add_parser("check", help="decide whether one failure is a known issue")
+    s = add(sub, "check", help="decide whether one failure is a known issue")
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument("--case")
     g.add_argument("--job", help="CI job name, for a job-level failure")
@@ -283,16 +296,16 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--no-context", action="store_true", help="skip the testcase view")
     s.set_defaults(func=cmd_check)
 
-    s = sub.add_parser("signature", help="add or attach a failure signature")
+    s = add(sub, "signature", help="add or attach a failure signature")
     ss = s.add_subparsers(dest="action", required=True)
-    a = ss.add_parser("add")
+    a = add(ss, "add")
     case_args(a)
     a.add_argument("--id", required=True)
     a.add_argument("--label", required=True)
     a.add_argument("--frames", required=True, help="comma-separated, innermost first")
     a.add_argument("--text", action="append", help="substring the stack must contain")
     a.set_defaults(func=cmd_signature_add)
-    a = ss.add_parser("attach")
+    a = add(ss, "attach")
     case_args(a)
     a.add_argument("--run", type=int, required=True)
     a.add_argument("--shard", required=True)
@@ -301,22 +314,22 @@ def parser() -> argparse.ArgumentParser:
     a.add_argument("--signature")
     a.set_defaults(func=cmd_signature_attach)
 
-    s = sub.add_parser("link", help="relate a testcase to an issue")
+    s = add(sub, "link", help="relate a testcase to an issue")
     case_args(s)
     s.add_argument("--issue", required=True)
     s.add_argument("--relation", required=True, choices=RELATIONS)
     s.add_argument("--signature")
     s.set_defaults(func=cmd_link)
 
-    s = sub.add_parser("note", help="leave a note on a testcase")
+    s = add(sub, "note", help="leave a note on a testcase")
     case_args(s)
     s.add_argument("--body", required=True)
     s.add_argument("--ref", action="append", help="a PR, run, issue, or document reference")
     s.set_defaults(func=cmd_note)
 
-    s = sub.add_parser("rule", help="add or retire a known-issue rule")
+    s = add(sub, "rule", help="add or retire a known-issue rule")
     ss = s.add_subparsers(dest="action", required=True)
-    a = ss.add_parser("add", help="dry run unless --yes and --approved-by")
+    a = add(ss, "add", help="dry run unless --yes and --approved-by")
     a.add_argument("--id", required=True)
     g = a.add_mutually_exclusive_group(required=True)
     g.add_argument("--signature")
@@ -327,21 +340,21 @@ def parser() -> argparse.ArgumentParser:
     a.add_argument("--approved-by")
     a.add_argument("--yes", action="store_true")
     a.set_defaults(func=cmd_rule_add)
-    a = ss.add_parser("retire")
+    a = add(ss, "retire")
     a.add_argument("id")
     a.add_argument("--reason", required=True)
     a.set_defaults(func=cmd_rule_retire)
 
-    s = sub.add_parser("validate", help="check cross-record invariants")
+    s = add(sub, "validate", help="check cross-record invariants")
     s.set_defaults(func=cmd_validate)
-    s = sub.add_parser("log", help="show the write history")
+    s = add(sub, "log", help="show the write history")
     case_args(s, required=False)
     s.add_argument("--limit", type=int, default=50)
     s.set_defaults(func=cmd_log)
-    s = sub.add_parser("backup", help="save a consistent SQLite snapshot")
+    s = add(sub, "backup", help="save a consistent SQLite snapshot")
     s.add_argument("--out")
     s.set_defaults(func=cmd_backup)
-    s = sub.add_parser("export", help="print every record as TOML for review")
+    s = add(sub, "export", help="print every record as TOML for review")
     s.set_defaults(func=cmd_export)
     return p
 
