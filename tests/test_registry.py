@@ -439,12 +439,32 @@ class CiAttemptTest(CliBase):
             shutil.rmtree(self.attempt)
             shutil.copytree(ATTEMPT, self.attempt)
             target = next(self.attempt.glob(name))
-            data = json.loads(target.read_text()) | {"schema_version": 3}
+            data = json.loads(target.read_text()) | {"schema_version": 4}
             target.write_text(json.dumps(data))
             with self.assertRaises(SystemExit) as stopped, redirect_stderr(StringIO()) as err:
                 cli.main(["check", "--ci-attempt", str(self.attempt), "--offline"])
             self.assertEqual(stopped.exception.code, 2)
-            self.assertIn("schema_version 3", err.getvalue())
+            self.assertIn("schema_version 4", err.getvalue())
+
+    def rerun_summary(self, mode, **changes):
+        target = self.attempt / "summary.json"
+        source = {"mode": mode, "run_id": 1, "attempt": 1,
+                  "summary": "providers/github-actions/runs/1/attempts/1/test_shell/summary.json"}
+        data = json.loads(target.read_text()) | {"schema_version": 3, "rerun": source} | changes
+        target.write_text(json.dumps(data))
+        return source
+
+    def test_partial_rerun_summary_is_checked(self):
+        source = self.rerun_summary("partial")
+        out = self.run_cli("check", "--ci-attempt", str(self.attempt), "--offline")
+        self.assertEqual(out["rerun"], source)
+        self.assertEqual(out["failure_count"], 3)
+
+    def test_carried_forward_rerun_points_at_its_source(self):
+        source = self.rerun_summary("carried_forward", shards=[], failures=[])
+        out = self.run_cli("check", "--ci-attempt", str(self.attempt), "--offline")
+        self.assertEqual((out["failure_count"], out["rerun"]), (0, source))
+        self.assertEqual(self.calls(), [])
 
     def test_options_are_validated(self):
         for argv in (["--case", "x", "--offline", "--record"], ["--case", "x", "--offline"]):

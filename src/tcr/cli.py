@@ -179,6 +179,9 @@ def check_attempt(args, store):
               "failures": entries}
     lines = [f"{result['suite']} run {result['run']} attempt {result['attempt']}: "
              f"{len(entries)} failures, " + (_counts_text(counts) or "none")]
+    if rerun := result.get("rerun"):
+        lines.append(f"  {rerun['mode']} rerun of run {rerun['run_id']} attempt {rerun['attempt']}"
+                     + ("; its failures are in that attempt" if not entries else ""))
     for e in entries:
         i, h = e["identity"], e["history"]
         past = (f"{h['failures']} failures, {h['passes']} passes"

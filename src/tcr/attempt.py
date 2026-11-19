@@ -5,20 +5,22 @@ from pathlib import Path
 
 from .store import RegistryError
 
-SCHEMA_VERSION = 2
+# summary.json 3 adds `commit` and `rerun` (the source attempt of a rerun) to version 2.
+SUMMARY_VERSIONS = (2, 3)
+METADATA_VERSIONS = (2,)
 # CI suite name -> Chronicle suite. test_sql_by_cci has no Chronicle suite.
 CHRONICLE_SUITE = {"test_sql": "sql", "test_medium": "medium", "test_shell": "shell",
                    "test_sql_by_cci": None}
 
 
-def _read(path: Path, what: str) -> dict:
+def _read(path: Path, what: str, versions: tuple[int, ...]) -> dict:
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError) as e:
         raise RegistryError(f"cannot read {what} {path}: {e}") from e
-    if data.get("schema_version") != SCHEMA_VERSION:
+    if data.get("schema_version") not in versions:
         raise RegistryError(f"{path} has schema_version {data.get('schema_version')!r};"
-                            f" this cubrid-tcr reads version {SCHEMA_VERSION}")
+                            f" this cubrid-tcr reads {', '.join(map(str, versions))}")
     return data
 
 
@@ -28,7 +30,7 @@ def load(directory: str) -> dict:
     `engine_sha` is the shard's tested Engine commit (`shards[].build.sha`), not the workflow head.
     """
     root = Path(directory)
-    summary = _read(root / "summary.json", "summary")
+    summary = _read(root / "summary.json", "summary", SUMMARY_VERSIONS)
     suite = summary.get("suite")
     if suite not in CHRONICLE_SUITE:
         raise RegistryError(f"unknown CI suite {suite!r} in {root / 'summary.json'}")
@@ -36,7 +38,7 @@ def load(directory: str) -> dict:
     failures = []
     for entry in summary["failures"]:
         folder = root / "failures" / entry["stable_id"]
-        meta = _read(folder / "metadata.json", "failure metadata")
+        meta = _read(folder / "metadata.json", "failure metadata", METADATA_VERSIONS)
         if meta["shard"] not in shas:
             raise RegistryError(f"{folder}: shard {meta['shard']} is not in summary.json shards")
         message = root / meta["message_path"]
@@ -54,4 +56,7 @@ def load(directory: str) -> dict:
               "attempt": summary["attempt"], "schema_version": summary["schema_version"],
               "ci_state": summary.get("ci_state"),
               "collection_state": summary.get("collection_state")}
+    if summary.get("rerun"):
+        # A carried_forward rerun ran no cases. Its failures are in the source attempt.
+        header["rerun"] = summary["rerun"]
     return {"header": header, "failures": failures}
