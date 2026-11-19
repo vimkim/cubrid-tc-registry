@@ -252,7 +252,8 @@ class Store:
             raise RegistryError(f"no signature {sig_id}")
         if sig["testcase_id"] != tc.id:
             raise RegistryError(f"signature {sig_id} belongs to another testcase")
-        key = (occurrence["repository"], occurrence["run_id"], occurrence["attempt"],
+        attempt = occurrence["attempt"] or 0  # Chronicle's null is unresolved; the key is NOT NULL
+        key = (occurrence["repository"], occurrence["run_id"], attempt,
                occurrence["shard"], tc.id, occurrence["ordinal"])
         after = {"signature_id": sig_id, "stack_digest": stack_digest}
         with self.write():

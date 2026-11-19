@@ -184,7 +184,7 @@ def check_attempt(args, store):
                      + ("; its failures are in that attempt" if not entries else ""))
     for e in entries:
         i, h = e["identity"], e["history"]
-        past = (f"{h['failures']} failures, {h['passes']} passes"
+        past = (f"{h['failures']} failures, {view.passes_text(h['passes'])}"
                 if h["available"] else h["reason"])
         lines.append(f"  {e['verdict']:11} shard {i['shard']} {i['path']} ({past})")
         lines.append(f"              {e['reason']}"
@@ -221,7 +221,7 @@ def _record(store, tc, fetched, f, stack_text):
         return {"result": "no_occurrence", "reason": str(fetched)}
     found = [chronicle.occurrence(o) for o in fetched[0].get("occurrences", [])]
     shard = f["shard"].lstrip("0")
-    found = [o for o in found if o["run_id"] == f["run"] and o["attempt"] in (0, f["attempt"])
+    found = [o for o in found if o["run_id"] == f["run"] and o["attempt"] in (None, f["attempt"])
              and o["shard"].lstrip("0") == shard and o["outcome"] in chronicle.FAILED]
     if len(found) != 1:
         return {"result": "no_occurrence", "reason": f"Chronicle has {len(found)} failed "

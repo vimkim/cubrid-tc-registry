@@ -387,18 +387,20 @@ import json, sys
 cmd = sys.argv[1]
 case = "__CASE__"
 if cmd == "find":
-    print(json.dumps({"candidates": [{"repository": "CUBRID/cubrid-testcases-private-ex",
-        "suite": "shell", "path": case, "variant": None}]}))
+    print(json.dumps({"schema_version": 2, "candidates": [
+        {"repository": "CUBRID/cubrid-testcases-private-ex", "suite": "shell", "path": case,
+         "variant": None}]}))
 elif cmd == "history":
     occ = lambda run, out, day, base: {"repository": "CUBRID/cubrid", "run_id": run,
         "attempt": None, "shard": "39", "ordinal": 0, "outcome": out,
         "completed_at": day, "engine_sha": "cd24a212aa81", "build_mode": "debug",
-        "pull_request": {"number": 8299, "base_ref": base}, "engine_branch": None}
-    print(json.dumps({"occurrences": [
+        "pull_request": {"number": 8299, "base_ref": base}, "engine_branch": None,
+        "evidence": "test-results/test-shell.xml"}
+    print(json.dumps({"schema_version": 2, "occurrences": [
         occ(42868959374, "FAIL", "2026-11-10T22:37:55Z", "feature/oos-merge"),
         occ(42000000000, "PASS", "2026-11-09T22:37:55Z", "develop")]}))
 elif cmd == "status":
-    print(json.dumps({"status": "FAILING", "freshness": {"state": "STALE",
+    print(json.dumps({"schema_version": 1, "status": "FAILING", "freshness": {"state": "STALE",
         "needs_refresh": True, "discovery_through": "2026-10-27T12:20:00Z",
         "suggested_sync": ["cubrid-tcc", "sync-data", "--since", "2026-10-27T12:20:00Z",
                            "--until", "2026-11-12T00:00:00Z", "--suite", "shell",
@@ -541,10 +543,12 @@ if cmd == "history":
     occ = lambda shard, out: {"repository": "CUBRID/cubrid", "run_id": 43197154411,
         "attempt": 1, "shard": shard, "ordinal": 0, "outcome": out,
         "completed_at": "2026-11-12T22:00:00Z", "engine_sha": "fbb4f250576a",
-        "build_mode": "debug", "pull_request": {"number": 8494, "base_ref": "develop"}}
-    print(json.dumps({"occurrences": [occ("15", "ERROR"), occ("17", "ERROR")]}))
+        "build_mode": "debug", "pull_request": {"number": 8494, "base_ref": "develop"},
+        "evidence": "failed.list"}
+    print(json.dumps({"schema_version": 2,
+                      "occurrences": [occ("15", "ERROR"), occ("17", "ERROR")]}))
 elif cmd == "status":
-    print(json.dumps({"status": "FAILING", "freshness": {"state": "FRESH"}}))
+    print(json.dumps({"schema_version": 1, "status": "FAILING", "freshness": {"state": "FRESH"}}))
 """
 
 

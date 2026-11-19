@@ -37,12 +37,16 @@ def summarize(failures: list[dict]) -> dict:
     }
 
 
+def passes_text(passes: int | None) -> str:
+    return "passes not recorded (failure-list evidence)" if passes is None else f"{passes} passes"
+
+
 def build(store, tc, *, days=None, show_all=False, now=None, fetched=None) -> dict:
     """`fetched` is a (history, status) pair or a ChronicleError already read for this testcase."""
     now = now or datetime.now(UTC)
     tags = store.occurrence_tags(tc)
     history = {"available": True}
-    failures, passes = [], 0
+    failures, passes, recorded = [], 0, True
     try:
         if isinstance(fetched, Exception):
             raise fetched
@@ -50,7 +54,9 @@ def build(store, tc, *, days=None, show_all=False, now=None, fetched=None) -> di
     except chronicle.ChronicleError as e:
         history = {"available": False, "reason": str(e)}
     else:
-        for raw in hist.get("occurrences", []):
+        raws = hist["occurrences"]
+        recorded = chronicle.passes_recorded(raws)
+        for raw in raws:
             occ = chronicle.occurrence(raw)
             if occ["outcome"] not in chronicle.FAILED:
                 passes += occ["outcome"] == "PASS"
@@ -68,7 +74,7 @@ def build(store, tc, *, days=None, show_all=False, now=None, fetched=None) -> di
     shown, older, mode = window(failures, days=days, show_all=show_all, now=now)
     history.update(
         window=mode,
-        pass_count=passes,
+        pass_count=passes if recorded else None,
         failures=shown,
         older=summarize(older) if older else None,
         all_failures=summarize(failures),
@@ -92,7 +98,8 @@ def render(view: dict) -> str:
     else:
         a = h["all_failures"]
         out.append(
-            f"history: {h['status']}, {a['count']} failures and {h['pass_count']} passes indexed,"
+            f"history: {h['status']}, {a['count']} failures and "
+            f"{passes_text(h['pass_count'])}{'' if h['pass_count'] is None else ' indexed'},"
             f" freshness {h['freshness']}, window {h['window']}")
         if a["count"]:
             out.append(f"  first failure {a['first']}, last failure {a['last']}")
@@ -102,7 +109,8 @@ def render(view: dict) -> str:
             pr = f"PR #{f['pr']}" if f["pr"] else "no PR"
             out.append(
                 f"  {f['completed_at']}  {pr:9} {f['branch']:20} {f['outcome']:5}"
-                f" run {f['run_id']} shard {f['shard']} engine {(f['engine_sha'] or '?')[:10]}"
+                f" run {f['run_id']} attempt {_attempt(f['attempt'])} shard {f['shard']}"
+                f" engine {(f['engine_sha'] or '?')[:10]}"
                 f" signature {f['signature'] or 'unknown'}")
         if h["older"]:
             o = h["older"]
@@ -131,3 +139,7 @@ def render(view: dict) -> str:
 
 def _counts(c: dict) -> str:
     return ", ".join(f"{k} {v}" for k, v in sorted(c.items(), key=lambda kv: -kv[1]))
+
+
+def _attempt(a: int | None) -> str:
+    return "null (unresolved)" if a is None else str(a)
