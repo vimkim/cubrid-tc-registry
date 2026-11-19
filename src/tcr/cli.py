@@ -18,6 +18,7 @@ examples:
   cubrid-tcr check --case cbrd_27179 --suite shell --engine cd24a21 --stack-file core.txt
   cubrid-tcr check --job "shard sql_by_cci 01" --engine cd24a21
   cubrid-tcr check --ci-attempt ~/.local/share/cubrid-ci-data/.../attempts/1/test_shell --record
+  cubrid-tcr rules --audit
   cubrid-tcr note cbrd_27179 --suite shell --body "Also failed on PR #8404"
 """
 
@@ -326,6 +327,60 @@ def cmd_rule_add(args, store):
     emit(args, {"result": r}, f"rule {args.id}: {r}")
 
 
+EXPIRY_WARN_DAYS = 14
+
+
+def audit_rule(rule, issue, today):
+    """Add live issue state, days to expiry, and flags to one rule row."""
+    out = {"id": rule["id"], "kind": "job" if rule["job_contains"] is not None else "signature",
+           "signature": rule["signature_id"], "job_contains": rule["job_contains"],
+           "issue": rule["issue"], "expires": rule["expires"], "approved_by": rule["approved_by"],
+           "created": rule["created_at"], "retired": rule["retired_at"]}
+    if issue is not None:
+        out["issue_status"] = issue.status if issue.readable else None
+        out["issue_resolution"] = issue.resolution if issue.readable else None
+        if not issue.readable:
+            out["issue_error"] = issue.error
+    flags = []
+    if rule["expires"]:
+        days = (date.fromisoformat(rule["expires"]) - today).days
+        out["days_to_expiry"] = days
+        if days < 0:
+            flags.append("expired")
+        elif days <= EXPIRY_WARN_DAYS:
+            flags.append(f"expires within {EXPIRY_WARN_DAYS} days")
+    if issue is not None and issue.readable and issue.resolution == "Fixed":
+        flags.append("issue resolved Fixed: retire the rule or expect fix_* verdicts")
+    out["flags"] = flags
+    return out
+
+
+def cmd_rules(args, store):
+    rows = store.rules(active_only=not args.all)
+    today = date.today()
+    issues = {}
+    if args.audit:
+        for key in sorted({r["issue"] for r in rows if r["issue"]}):
+            issues[key] = verdict.read_issue(key)
+    data = [audit_rule(r, issues.get(r["issue"]), today) for r in rows]
+    lines = []
+    for d in data:
+        scope = f"job contains {d['job_contains']!r}" if d["kind"] == "job" else \
+            f"signature {d['signature']}"
+        lines.append(f"{d['id']} [{d['kind']}] {scope}" + (" (retired)" if d["retired"] else ""))
+        lines.append(f"  issue {d['issue'] or '-'}, expires {d['expires'] or '-'},"
+                     f" approved by {d['approved_by'] or '-'}, created {d['created']}")
+        if args.audit:
+            if "issue_status" in d:
+                state = d["issue_status"] or "unreadable"
+                lines.append(f"  {d['issue']}: {state} / {d['issue_resolution'] or 'unresolved'}"
+                             + (f" ({d['issue_error']})" if "issue_error" in d else ""))
+            if "days_to_expiry" in d:
+                lines.append(f"  expires in {d['days_to_expiry']} days")
+            lines += [f"  FLAG {f}" for f in d["flags"]]
+    emit(args, data, "\n".join(lines) or "no rules")
+
+
 def cmd_rule_retire(args, store):
     r = store.retire_rule(args.id, args.reason)
     emit(args, {"result": r}, f"rule {args.id}: {r}")
@@ -419,7 +474,7 @@ def parser() -> argparse.ArgumentParser:
                    help="failure text: a core backtrace or a failure message (NOK line)")
     s.add_argument("--engine-repo", default=os.environ.get("TCR_ENGINE_REPO"),
                    help="engine clone with origin/develop (default: $TCR_ENGINE_REPO)")
-    s.add_argument("--offline", action="store_true", help="skip the Jira read")
+    s.add_argument("--offline", action="store_true", help="skip the Jira and GitHub reads")
     s.add_argument("--no-context", action="store_true", help="skip the testcase view")
     s.set_defaults(func=cmd_check)
 
@@ -473,6 +528,12 @@ def parser() -> argparse.ArgumentParser:
     a.add_argument("id")
     a.add_argument("--reason", required=True)
     a.set_defaults(func=cmd_rule_retire)
+
+    s = add(sub, "rules", help="list known-issue rules, optionally with live issue state")
+    s.add_argument("--audit", action="store_true",
+                   help="read each issue from Jira and flag Fixed, expiring, and expired rules")
+    s.add_argument("--all", action="store_true", help="include retired rules")
+    s.set_defaults(func=cmd_rules)
 
     s = add(sub, "validate", help="check cross-record invariants")
     s.set_defaults(func=cmd_validate)

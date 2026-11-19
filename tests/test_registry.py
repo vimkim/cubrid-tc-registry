@@ -11,6 +11,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, date, datetime, timedelta
 from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 from tcr import cli, stack, verdict, view
 from tcr import store as store_module
@@ -168,6 +169,74 @@ class ReadFixTest(unittest.TestCase):
     def test_unknown_when_no_fix_or_no_commit(self):
         self.assertIsNone(verdict.read_fix("CBRD-9", self.fix, str(self.repo)).present)
         self.assertIsNone(verdict.read_fix("CBRD-1", "0" * 40, str(self.repo)).present)
+
+
+class ReadFixRemoteTest(ReadFixTest):
+    """The tested commit is absent from the clone, so GitHub answers."""
+
+    ENGINE = "5" * 40
+
+    def read(self, behind):
+        with mock.patch.object(verdict, "_gh_behind_by", side_effect=behind) as m:
+            return verdict.read_fix("CBRD-1", self.ENGINE, str(self.repo)), m
+
+    def test_behind_zero_is_present(self):
+        facts, m = self.read(lambda fix, engine: 0)
+        self.assertIs(facts.present, True)
+        m.assert_called_once_with(self.fix, self.ENGINE)
+
+    def test_behind_nonzero_is_missing(self):
+        facts, _ = self.read(lambda fix, engine: 17)
+        self.assertIs(facts.present, False)
+        self.assertEqual(facts.fix_commits, (self.fix,))
+
+    def test_gh_failure_is_unknown_with_error(self):
+        def fail(fix, engine):
+            raise OSError("gh: Not Found (HTTP 404)")
+        facts, _ = self.read(fail)
+        self.assertIsNone(facts.present)
+        self.assertIn("HTTP 404", facts.basis)
+
+    def test_no_fix_commit_never_asks_github(self):
+        with mock.patch.object(verdict, "_gh_behind_by") as m:
+            facts = verdict.read_fix("CBRD-9", self.ENGINE, str(self.repo))
+        self.assertIsNone(facts.present)
+        m.assert_not_called()
+
+    def test_gh_reply_parsing(self):
+        verdict._gh_behind_by.cache_clear()
+        ok = subprocess.CompletedProcess([], 0, '{"status": "diverged", "behind_by": 17}', "")
+        with mock.patch.object(verdict.subprocess, "run", return_value=ok) as run:
+            self.assertEqual(verdict._gh_behind_by("a", "b"), 17)
+            self.assertEqual(verdict._gh_behind_by("a", "b"), 17)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0][:2], ["gh", "api"])
+        bad = subprocess.CompletedProcess([], 1, "", "gh: Not Found\nmore")
+        with mock.patch.object(verdict.subprocess, "run", return_value=bad):
+            with self.assertRaisesRegex(OSError, "Not Found"):
+                verdict._gh_behind_by("c", "d")
+        verdict._gh_behind_by.cache_clear()
+
+
+class AuditRuleTest(unittest.TestCase):
+    def rule(self, **kw):
+        base = {"id": "r", "job_contains": None, "signature_id": "s", "issue": "CBRD-1",
+                "expires": None, "approved_by": "u", "created_at": "t", "retired_at": None}
+        return base | kw
+
+    def test_flags(self):
+        today = date(2026, 11, 19)
+        fixed = verdict.IssueFacts(True, "Closed", "Fixed")
+        open_ = verdict.IssueFacts(True, "Open", None)
+        a = cli.audit_rule(self.rule(), fixed, today)
+        self.assertEqual(len(a["flags"]), 1)
+        self.assertIn("Fixed", a["flags"][0])
+        a = cli.audit_rule(self.rule(expires="2026-12-03"), open_, today)
+        self.assertEqual((a["days_to_expiry"], len(a["flags"])), (14, 1))
+        a = cli.audit_rule(self.rule(expires="2026-12-04"), open_, today)
+        self.assertEqual(a["flags"], [])
+        a = cli.audit_rule(self.rule(expires="2026-11-18", job_contains="x"), None, today)
+        self.assertEqual((a["flags"], a["kind"], a["days_to_expiry"]), (["expired"], "job", -1))
 
 
 class StoreTest(unittest.TestCase):
@@ -397,6 +466,32 @@ class CliTest(CliBase):
         self.assertEqual(other["verdict"], "no_match")
         job = self.run_cli("check", "--job", "shard sql_by_cci 01", "--engine", "cd24a21")
         self.assertEqual(job["verdict"], "known_job")
+
+    def test_rules_lists_and_audits(self):
+        self.run_cli("signature", "add", "cbrd_27179", "--id", "vacuum", "--label", "l",
+                     "--frames", ",".join(FRAMES), "--text", "was_interrupted=false")
+        self.run_cli("rule", "add", "--id", "r", "--signature", "vacuum", "--issue",
+                     "CBRD-28018", "--not-covered", "-", "--yes", "--approved-by", "user")
+        soon = (date.today() + timedelta(days=5)).isoformat()
+        self.run_cli("rule", "add", "--id", "cci", "--job-contains", "sql_by_cci",
+                     "--expires", soon, "--not-covered", "-", "--yes", "--approved-by", "user")
+        self.run_cli("rule", "retire", "cci", "--reason", "done")
+        plain = self.run_cli("rules")
+        self.assertEqual([(r["id"], r["kind"]) for r in plain], [("r", "signature")])
+        with mock.patch.object(verdict, "read_issue",
+                               return_value=verdict.IssueFacts(True, "Closed", "Fixed")) as m:
+            audit = self.run_cli("rules", "--audit", "--all")
+        m.assert_called_once_with("CBRD-28018")
+        self.assertEqual([r["id"] for r in audit], ["cci", "r"])
+        self.assertEqual(audit[0]["retired"] is not None, True)
+        self.assertEqual(audit[0]["days_to_expiry"], 5)
+        self.assertEqual(audit[1]["issue_resolution"], "Fixed")
+        self.assertEqual(len(audit[1]["flags"]), 1)
+        buf = StringIO()
+        with redirect_stdout(buf), mock.patch.object(
+                verdict, "read_issue", return_value=verdict.IssueFacts(False, error="down")):
+            cli.main(["rules", "--audit"])
+        self.assertIn("unreadable", buf.getvalue())
 
     def test_global_options_work_after_the_command(self):
         db = str(Path(self.tmp.name) / "other.sqlite3")

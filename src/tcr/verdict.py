@@ -4,6 +4,7 @@
 are the only parts that touch the network or a repository.
 """
 
+import functools
 import json
 import subprocess
 import urllib.error
@@ -15,6 +16,7 @@ from . import stack
 
 JIRA_URL = "https://jira.cubrid.org/rest/api/2/issue/{key}?fields=status,resolution"
 FIX_REF = "origin/develop"
+ENGINE_GITHUB = "CUBRID/cubrid"
 
 VERDICTS = ("no_match", "expired", "known", "known_job", "fix_missing", "fix_present", "unknown")
 
@@ -116,9 +118,45 @@ def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
 
 
+@functools.cache
+def _gh_behind_by(fix: str, engine: str) -> int:
+    """Commits of `fix` that `engine` lacks, from GitHub's compare API. Read-only."""
+    r = subprocess.run(["gh", "api", f"repos/{ENGINE_GITHUB}/compare/{fix}...{engine}"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise OSError((r.stderr.strip() or f"gh exited {r.returncode}").splitlines()[0])
+    try:
+        return int(json.loads(r.stdout)["behind_by"])
+    except (KeyError, ValueError, TypeError) as e:
+        raise OSError(f"unexpected compare reply: {e}") from e
+
+
+def _read_fix_remote(key: str, engine_sha: str, repo: str) -> FixFacts:
+    """The tested commit is not in the clone: ask GitHub about each fix commit."""
+    found = _git(repo, "log", "--format=%H", f"--grep=\\[{key}\\]", FIX_REF)
+    commits = tuple(found.stdout.split()) if found.returncode == 0 else ()
+    if not commits:
+        return FixFacts(None, f"the tested commit {engine_sha} is not in {repo}"
+                              f" and no commit on {FIX_REF} names {key}")
+    missing = []
+    for c in commits:
+        try:
+            behind = _gh_behind_by(c, engine_sha)
+        except OSError as e:
+            return FixFacts(None, f"GitHub compare of {c[:12]}...{engine_sha} failed: {e}",
+                            commits)
+        if behind:
+            missing.append(c)
+    if missing:
+        return FixFacts(False, f"GitHub compare: {engine_sha} lacks fix commit"
+                               f" {missing[0][:12]} from {FIX_REF}", commits)
+    return FixFacts(True, f"GitHub compare: every fix commit is an ancestor of {engine_sha}",
+                    commits)
+
+
 def read_fix(key: str, engine_sha: str, repo: str) -> FixFacts:
     if _git(repo, "cat-file", "-e", f"{engine_sha}^{{commit}}").returncode != 0:
-        return FixFacts(None, f"the tested commit {engine_sha} is not in {repo}")
+        return _read_fix_remote(key, engine_sha, repo)
     pattern = f"\\[{key}\\]"
     found = _git(repo, "log", "--format=%H", f"--grep={pattern}", FIX_REF)
     if found.returncode != 0:
