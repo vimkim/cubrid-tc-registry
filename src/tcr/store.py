@@ -17,7 +17,17 @@ SUITE_REPOSITORY = {
 RELATIONS = ("origin", "tracks", "suspected", "fixed_by")
 ISSUE_KEY = re.compile(r"^CBRD-\d+$")
 
-SCHEMA = """
+SIGNATURE_TABLE = """CREATE TABLE signature (
+    id TEXT PRIMARY KEY,
+    testcase_id INTEGER NOT NULL REFERENCES testcase(id),
+    label TEXT NOT NULL,
+    frames TEXT NOT NULL,
+    required_text TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    CHECK (json_array_length(frames) > 0 OR json_array_length(required_text) > 0)
+);"""
+
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS testcase (
     id INTEGER PRIMARY KEY,
     repository TEXT NOT NULL,
@@ -26,14 +36,7 @@ CREATE TABLE IF NOT EXISTS testcase (
     variant TEXT NOT NULL DEFAULT '',
     UNIQUE (repository, suite, path, variant)
 );
-CREATE TABLE IF NOT EXISTS signature (
-    id TEXT PRIMARY KEY,
-    testcase_id INTEGER NOT NULL REFERENCES testcase(id),
-    label TEXT NOT NULL,
-    frames TEXT NOT NULL CHECK (json_array_length(frames) > 0),
-    required_text TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL
-);
+{SIGNATURE_TABLE.replace('CREATE TABLE', 'CREATE TABLE IF NOT EXISTS', 1)};
 CREATE TABLE IF NOT EXISTS occurrence_signature (
     repository TEXT NOT NULL,
     run_id INTEGER NOT NULL,
@@ -141,6 +144,35 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.executescript(SCHEMA)
+        self._migrate_signature()
+
+    def _migrate_signature(self):
+        """Rebuild `signature` once when it still has the frames-only CHECK."""
+        (sql,) = self.db.execute("SELECT sql FROM sqlite_master WHERE name='signature'").fetchone()
+        if "required_text) > 0" in sql:
+            return
+        new = SIGNATURE_TABLE.replace("signature", "signature_new", 1)
+        # foreign_keys cannot change inside a transaction. With it off, DROP keeps child rows.
+        self.db.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                (sql,) = self.db.execute(
+                    "SELECT sql FROM sqlite_master WHERE name='signature'").fetchone()
+                if "required_text) > 0" not in sql:  # another process may have migrated first
+                    self.db.execute(new)
+                    self.db.execute("INSERT INTO signature_new SELECT id, testcase_id, label,"
+                                    " frames, required_text, created_at FROM signature")
+                    self.db.execute("DROP TABLE signature")
+                    self.db.execute("ALTER TABLE signature_new RENAME TO signature")
+                    if bad := self.db.execute("PRAGMA foreign_key_check").fetchall():
+                        raise RegistryError(f"signature migration broke foreign keys: {bad}")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+            self.db.execute("COMMIT")
+        finally:
+            self.db.execute("PRAGMA foreign_keys=ON")
 
     @contextmanager
     def write(self):
@@ -184,8 +216,8 @@ class Store:
     # Writes. Each returns "added" or "unchanged" so a repeated command converges.
 
     def add_signature(self, tc: Testcase, sig_id, label, frames, required_text) -> str:
-        if not frames:
-            raise RegistryError("a signature needs at least one frame")
+        if not frames and not required_text:
+            raise RegistryError("a signature needs at least one frame or one --text")
         after = {"testcase_id": tc.id, "label": label, "frames": frames,
                  "required_text": required_text}
         with self.write():

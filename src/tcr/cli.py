@@ -150,8 +150,7 @@ def check_attempt(args, store):
     for f in failures:
         k = (f["suite"], f["path"])
         job = f"shard {f['suite'].removeprefix('test_')} {f['shard']}"
-        stacks = stack.parse_stacks(f["message"])
-        stack_text = f["message"] if stacks else None
+        stack_text = f["message"] or None  # the failure text, whether or not a stack parsed
         rules = store.job_rules()
         if k in tcs:
             rules = store.rules(tc=tcs[k]) + rules
@@ -166,7 +165,7 @@ def check_attempt(args, store):
             "verdict": overall,
             "hits": [h.as_dict() for h in hits],
             "reason": winner.reason if winner else "no rule matched",
-            "stack_found": stack_text is not None,
+            "stack_found": bool(stack_text and stack.parse_stacks(stack_text)),
             "history": _history_counts(views.get(k)),
         }
         if args.record and k in tcs:
@@ -242,13 +241,13 @@ def _overall(hits) -> str:
     """One verdict for the failure. A rule that says "analyze as new" wins over "known"."""
     if not hits:
         return "no_match"
-    order = ["fix_present", "expired", "unknown", "fix_missing", "known"]
+    order = ["fix_present", "expired", "unknown", "fix_missing", "known", "known_job"]
     return min((h.verdict for h in hits), key=order.index)
 
 
 def cmd_signature_add(args, store):
     tc = resolve(store, args.case, args.suite, create=True)
-    frames = [f.strip() for f in args.frames.split(",") if f.strip()]
+    frames = [f.strip() for f in (args.frames or "").split(",") if f.strip()]
     r = store.add_signature(tc, args.id, args.label, frames, args.text or [])
     emit(args, {"result": r, "signature": args.id}, f"signature {args.id}: {r}")
 
@@ -416,7 +415,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--record", action="store_true",
                    help="with --ci-attempt, attach a signature to each occurrence that matches"
                         " exactly one; without it nothing is written")
-    s.add_argument("--stack-file", help="core backtrace text")
+    s.add_argument("--stack-file",
+                   help="failure text: a core backtrace or a failure message (NOK line)")
     s.add_argument("--engine-repo", default=os.environ.get("TCR_ENGINE_REPO"),
                    help="engine clone with origin/develop (default: $TCR_ENGINE_REPO)")
     s.add_argument("--offline", action="store_true", help="skip the Jira read")
@@ -429,15 +429,17 @@ def parser() -> argparse.ArgumentParser:
     case_args(a)
     a.add_argument("--id", required=True)
     a.add_argument("--label", required=True)
-    a.add_argument("--frames", required=True, help="comma-separated, innermost first")
-    a.add_argument("--text", action="append", help="substring the stack must contain")
+    a.add_argument("--frames", help="comma-separated, innermost first; optional with --text")
+    a.add_argument("--text", action="append",
+                   help="substring the failure text must contain; with no --frames the signature"
+                        " matches NOK lines and other failure messages")
     a.set_defaults(func=cmd_signature_add)
     a = add(ss, "attach")
     case_args(a)
     a.add_argument("--run", type=int, required=True)
     a.add_argument("--shard", required=True)
     a.add_argument("--attempt", type=int)
-    a.add_argument("--stack-file", required=True)
+    a.add_argument("--stack-file", required=True, help="failure text, as in check")
     a.add_argument("--signature")
     a.set_defaults(func=cmd_signature_attach)
 

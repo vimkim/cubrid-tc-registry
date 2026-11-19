@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from io import StringIO
 from pathlib import Path
 
 from tcr import cli, stack, verdict, view
+from tcr import store as store_module
 from tcr.store import RegistryError, Store
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -48,6 +50,30 @@ class StackTest(unittest.TestCase):
         self.assertFalse(stack.matches(text, ["pgbuf_fix_debug", "vacuum_heap_page"], []))
 
 
+NOK = "cbrd_21737-3 : NOK stat.log is empty\nother lines\n"
+
+
+class TextSignatureTest(unittest.TestCase):
+    def test_text_only_matches_when_every_text_appears(self):
+        self.assertTrue(stack.matches(NOK, [], ["NOK stat.log is empty"]))
+        self.assertTrue(stack.matches(NOK, [], ["NOK", "other lines"]))
+        self.assertFalse(stack.matches(NOK, [], ["NOK", "absent"]))
+
+    def test_scope_without_text_or_stack_is_unknown(self):
+        text_sig = {"frames": [], "required_text": ["NOK"]}
+        frames_sig = {"frames": FRAMES, "required_text": []}
+        r = rule()
+
+        def scope(text, sig):
+            return verdict.scope_matches(r, job=None, stack_text=text, signature=sig)
+
+        self.assertEqual(scope(None, text_sig), "no_stack")
+        self.assertEqual(scope(NOK, text_sig), "match")
+        self.assertEqual(scope("unrelated", text_sig), "miss")
+        self.assertEqual(scope(NOK, frames_sig), "no_stack", "text without a parsed stack")
+        self.assertEqual(scope(None, frames_sig), "no_stack")
+
+
 def rule(**kw):
     base = {"id": "r", "issue": "CBRD-1", "expires": None, "not_covered": "-",
             "job_contains": None, "signature_id": "s"}
@@ -74,6 +100,9 @@ class DecideTest(unittest.TestCase):
             (rule(), "no_stack", OPEN, None, "unknown"),
             (rule(issue=None, expires="2026-12-09"), "match", None, None, "known"),
             (rule(), "match", OPEN, None, "known"),
+            (rule(job_contains="x", signature_id=None), "match", OPEN, None, "known_job"),
+            (rule(job_contains="x", signature_id=None, issue=None, expires="2026-12-09"),
+             "match", None, None, "known_job"),
             (rule(), "match", verdict.IssueFacts(False, error="timeout"), None, "unknown"),
             (rule(), "match", None, None, "unknown"),
             (rule(), "match", verdict.IssueFacts(True, "Closed", "Won't Fix"), None, "unknown"),
@@ -90,6 +119,14 @@ class DecideTest(unittest.TestCase):
                                                                      "", "")]
         self.assertEqual(cli._overall(hits), "fix_present")
         self.assertEqual(cli._overall([]), "no_match")
+
+    def test_signature_known_outranks_job_known(self):
+        hits = [verdict.Hit("job", None, "known_job", "", ""),
+                verdict.Hit("sig", None, "known", "", "")]
+        self.assertEqual(cli._overall(hits), "known")
+        self.assertEqual(cli._overall(hits[:1]), "known_job")
+        self.assertEqual(cli._overall(hits[:1] + [verdict.Hit("x", None, "unknown", "", "")]),
+                         "unknown")
 
 
 def git(repo, *args):
@@ -146,6 +183,14 @@ class StoreTest(unittest.TestCase):
         self.store.db.close()
         self.tmp.cleanup()
 
+    def test_signature_needs_frames_or_text(self):
+        with self.assertRaises(RegistryError):
+            self.store.add_signature(self.tc, "empty", "l", [], [])
+        self.assertEqual(self.store.add_signature(self.tc, "nok", "l", [], ["NOK"]), "added")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.db.execute(
+                "INSERT INTO signature VALUES ('raw', ?, 'l', '[]', '[]', 'now')", (self.tc.id,))
+
     def test_rule_scope_and_lifetime_are_enforced(self):
         with self.assertRaises(RegistryError):
             self.store.add_rule("x", sig_id="vacuum", job_contains="sql_by_cci", issue=None,
@@ -189,6 +234,66 @@ class StoreTest(unittest.TestCase):
 def failure(day, branch="develop"):
     return {"completed_at": day.strftime("%Y-%m-%dT%H:%M:%SZ"), "branch": branch,
             "signature": None}
+
+
+OLD_SIGNATURE = """CREATE TABLE signature (
+    id TEXT PRIMARY KEY,
+    testcase_id INTEGER NOT NULL REFERENCES testcase(id),
+    label TEXT NOT NULL,
+    frames TEXT NOT NULL CHECK (json_array_length(frames) > 0),
+    required_text TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);"""
+
+
+class MigrationTest(unittest.TestCase):
+    def build_old(self, path):
+        schema = store_module.SCHEMA.replace(
+            store_module.SIGNATURE_TABLE.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1),
+            OLD_SIGNATURE.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1))
+        self.assertIn("frames) > 0),", schema)
+        db = sqlite3.connect(path)
+        db.executescript(schema)
+        db.executescript("""
+            INSERT INTO testcase VALUES (1, 'r', 'shell', 'p', '');
+            INSERT INTO signature VALUES ('s', 1, 'l', '["a"]', '["t"]', 'then');
+            INSERT INTO occurrence_signature
+                VALUES ('r', 7, 1, '3', 1, 0, 's', 'dg', 'a', 'then');
+            INSERT INTO issue_link VALUES (1, 'CBRD-1', 'tracks', 's', 'a', 'then');
+            INSERT INTO rule(id, signature_id, issue, not_covered, approved_by, created_at)
+                VALUES ('ru', 's', 'CBRD-1', '-', 'u', 'then');
+            INSERT INTO event(at, actor, command, entity, entity_key)
+                VALUES ('then', 'a', 'signature add', 'signature', 's');
+        """)
+        db.commit()
+        db.close()
+
+    def counts(self, db):
+        return {t: db.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in
+                ("testcase", "signature", "occurrence_signature", "issue_link", "rule", "note",
+                 "event")}
+
+    def test_old_database_is_rebuilt_once_keeping_every_row(self):
+        path = Path(tempfile.mkdtemp()) / "old.sqlite3"
+        self.addCleanup(shutil.rmtree, path.parent)
+        self.build_old(path)
+        raw = sqlite3.connect(path)
+        before = self.counts(raw)
+        raw.close()
+        store = Store(path, "tester")
+        self.assertEqual(self.counts(store.db), before)
+        self.assertEqual(store.signature("s")["frames"], ["a"])
+        self.assertEqual(store.db.execute("PRAGMA foreign_key_check").fetchall(), [])
+        self.assertEqual(store.db.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+        self.assertEqual(store.validate(), [])
+        tc = store.testcase("shell", "p", "r")
+        self.assertEqual(store.add_signature(tc, "nok", "l", [], ["NOK"]), "added")
+        events = store.db.execute("SELECT count(*) FROM event").fetchone()[0]
+        store.db.close()
+        again = Store(path, "tester")  # second open changes nothing
+        self.assertEqual(again.db.execute("SELECT count(*) FROM event").fetchone()[0], events)
+        self.assertEqual(again.signature("nok")["frames"], [])
+        again.db.close()
 
 
 class WindowTest(unittest.TestCase):
@@ -291,7 +396,7 @@ class CliTest(CliBase):
                              "--offline", "--no-context")
         self.assertEqual(other["verdict"], "no_match")
         job = self.run_cli("check", "--job", "shard sql_by_cci 01", "--engine", "cd24a21")
-        self.assertEqual(job["verdict"], "known")
+        self.assertEqual(job["verdict"], "known_job")
 
     def test_global_options_work_after_the_command(self):
         db = str(Path(self.tmp.name) / "other.sqlite3")
@@ -304,7 +409,7 @@ class CliTest(CliBase):
         with redirect_stdout(buf):
             cli.main(["check", "--job", "shard sql_by_cci 01", "--engine", "cd24a21",
                       "--offline", "--database", db, "--json"])
-        self.assertEqual(json.loads(buf.getvalue())["verdict"], "known")
+        self.assertEqual(json.loads(buf.getvalue())["verdict"], "known_job")
         buf = StringIO()
         with redirect_stdout(buf):
             cli.main(["--database", db, "--json", "log"])
@@ -372,7 +477,7 @@ class CiAttemptTest(CliBase):
         out = self.run_cli("check", "--ci-attempt", str(self.attempt), "--offline")
         self.assertEqual((out["suite"], out["run"], out["attempt"], out["failure_count"]),
                          ("test_shell", 43197154411, 1, 3))
-        self.assertEqual(out["verdicts"], {"known": 2, "no_match": 1})
+        self.assertEqual(out["verdicts"], {"known": 1, "known_job": 1, "no_match": 1})
         core = self.by_path(out)[CORE_CASE]
         self.assertEqual(core["identity"], {
             "suite": "test_shell", "path": CORE_CASE, "run": 43197154411, "attempt": 1,
@@ -382,7 +487,7 @@ class CiAttemptTest(CliBase):
         self.assertEqual(core["hits"][0]["rule_id"], "r")
         self.assertEqual(core["history"]["failures"], 2)
         jobbed = self.by_path(out)["shell/_06_issues/_26_2h/cbrd_26861/cases/cbrd_26861.sh"]
-        self.assertEqual((jobbed["verdict"], jobbed["hits"][0]["rule_id"]), ("known", "job"))
+        self.assertEqual((jobbed["verdict"], jobbed["hits"][0]["rule_id"]), ("known_job", "job"))
         self.assertFalse(jobbed["stack_found"])
         self.assertTrue(all("record" not in f for f in out["failures"]))
 
@@ -410,7 +515,7 @@ class CiAttemptTest(CliBase):
         out = self.run_cli(*argv, "--record")
         recs = {f["identity"]["shard"]: f["record"] for f in out["failures"]}
         self.assertEqual(recs["15"], {"result": "added", "signature": "manager-core"})
-        self.assertEqual(recs["17"]["result"], "no_stack")
+        self.assertEqual(recs["17"]["result"], "no_single_match")
         again = self.by_path(self.run_cli(*argv, "--record"))[CORE_CASE]
         self.assertEqual(again["record"]["result"], "unchanged")
         self.assertEqual(len([e for e in self.run_cli("log") if e["command"] ==
@@ -418,6 +523,38 @@ class CiAttemptTest(CliBase):
         shown = self.run_cli("show", CORE_CASE)
         self.assertEqual(shown["history"]["all_failures"]["by_signature"],
                          {"manager-core": 1, "unknown": 1})
+
+    def test_text_signature_matches_ci_attempt_without_a_stack(self):
+        case = "shell/_06_issues/_26_2h/cbrd_26861/cases/cbrd_26861.sh"  # message has no stack
+        for sig, extra in (("nok", ["--text", "cbrd_26861-1 : NOK"]),
+                           ("frames", ["--frames", "no_such_frame"])):
+            self.run_cli("signature", "add", case, "--id", sig, "--label", "l", *extra)
+            self.run_cli("rule", "add", "--id", f"r-{sig}", "--signature", sig,
+                         "--expires", "2099-01-01", "--not-covered", "-", "--yes",
+                         "--approved-by", "user")
+        out = self.run_cli("check", "--ci-attempt", str(self.attempt), "--offline", "--record")
+        f = self.by_path(out)[case]
+        by_rule = {h["rule_id"]: h["verdict"] for h in f["hits"]}
+        self.assertEqual(by_rule, {"r-nok": "known", "r-frames": "unknown"})
+        self.assertEqual((f["verdict"], f["stack_found"]), ("unknown", False))
+        # The frames signature cannot match without a stack, so the text one is the single match.
+        self.assertEqual(f["record"], {"result": "added", "signature": "nok"})
+        self.assertEqual(self.by_path(out)[CORE_CASE]["verdict"], "no_match")
+
+    def test_text_only_check_with_stack_file_and_no_text(self):
+        self.run_cli("signature", "add", CORE_CASE, "--id", "nok", "--label", "l",
+                     "--text", "NOK stat.log")
+        self.run_cli("rule", "add", "--id", "r", "--signature", "nok", "--expires", "2099-01-01",
+                     "--not-covered", "-", "--yes", "--approved-by", "user")
+        base = ["check", "--case", CORE_CASE, "--engine", "e", "--offline", "--no-context"]
+        self.assertEqual(self.run_cli(*base)["verdict"], "unknown")
+        text = Path(self.tmp.name) / "m.txt"
+        text.write_text(NOK)
+        self.assertEqual(self.run_cli(*base, "--stack-file", str(text))["verdict"], "known")
+        text.write_text("something else")
+        self.assertEqual(self.run_cli(*base, "--stack-file", str(text))["verdict"], "no_match")
+        self.assertRaises(SystemExit, cli.main, ["signature", "add", CORE_CASE, "--id", "x",
+                                                  "--label", "l"])
 
     def test_by_cci_has_no_history_and_uses_job_rules(self):
         self.run_cli("rule", "add", "--id", "cci", "--job-contains", "shard sql_by_cci 15",
@@ -429,7 +566,7 @@ class CiAttemptTest(CliBase):
         out = self.run_cli("check", "--ci-attempt", str(self.attempt), "--offline", "--record")
         self.assertEqual(self.calls(), [])
         core = self.by_path(out)[CORE_CASE]
-        self.assertEqual((core["verdict"], core["hits"][0]["rule_id"]), ("known", "cci"))
+        self.assertEqual((core["verdict"], core["hits"][0]["rule_id"]), ("known_job", "cci"))
         self.assertFalse(core["history"]["available"])
         self.assertIn("no Chronicle suite", core["history"]["reason"])
         self.assertNotIn("record", core)

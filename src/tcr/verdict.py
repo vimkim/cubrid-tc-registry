@@ -16,7 +16,7 @@ from . import stack
 JIRA_URL = "https://jira.cubrid.org/rest/api/2/issue/{key}?fields=status,resolution"
 FIX_REF = "origin/develop"
 
-VERDICTS = ("no_match", "expired", "known", "fix_missing", "fix_present", "unknown")
+VERDICTS = ("no_match", "expired", "known", "known_job", "fix_missing", "fix_present", "unknown")
 
 
 @dataclass(frozen=True)
@@ -52,10 +52,14 @@ class Hit:
 
 
 def scope_matches(rule, *, job: str | None, stack_text: str | None, signature) -> str:
-    """Return "match", "miss", or "no_stack" for one rule against one failure."""
+    """Return "match", "miss", or "no_stack" for one rule against one failure.
+
+    `stack_text` is the failure text, a core backtrace or a failure message. A frames signature
+    needs a parsed stack in it. A text-only signature needs any text.
+    """
     if rule["job_contains"] is not None:
         return "match" if job is not None and rule["job_contains"] in job else "miss"
-    if stack_text is None:
+    if stack_text is None or (signature["frames"] and not stack.parse_stacks(stack_text)):
         return "no_stack"
     return "match" if stack.matches(stack_text, signature["frames"],
                                      signature["required_text"]) else "miss"
@@ -66,6 +70,10 @@ def decide(rule, scope: str, today: date, issue: IssueFacts | None,
     """Map one rule and its gathered facts to a verdict. None means the rule does not apply."""
 
     def hit(verdict, reason, commits=()):
+        if verdict == "known" and rule["job_contains"] is not None:
+            verdict = "known_job"
+            reason = ("the job is known noisy and each failure's symptom still needs analysis;"
+                      f" {reason}")
         return Hit(rule["id"], rule["issue"], verdict, reason, rule["not_covered"], tuple(commits))
 
     if scope == "miss":
@@ -73,7 +81,8 @@ def decide(rule, scope: str, today: date, issue: IssueFacts | None,
     if rule["expires"] is not None and date.fromisoformat(rule["expires"]) < today:
         return hit("expired", f"the rule expired on {rule['expires']}")
     if scope == "no_stack":
-        return hit("unknown", "no stack was given, so the signature could not be compared")
+        return hit("unknown",
+                   "no stack or failure text was given, so the signature could not be compared")
     if rule["issue"] is None:
         return hit("known", "the rule has no tracking issue and has not expired")
     if issue is None or not issue.readable:

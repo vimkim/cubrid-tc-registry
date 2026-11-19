@@ -41,6 +41,7 @@ def is_subsequence(needle: list[str], haystack: list[str]) -> bool:
 
 
 def matches(text: str, frames: list[str], required_text: list[str]) -> bool:
+    """A frames signature needs its frames in a parsed stack. A text-only one has no frames."""
     if not all(t in text for t in required_text):
         return False
-    return any(is_subsequence(frames, stack) for stack in parse_stacks(text))
+    return not frames or any(is_subsequence(frames, stack) for stack in parse_stacks(text))
