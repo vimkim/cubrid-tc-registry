@@ -10,7 +10,24 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from . import __version__, attempt, chronicle, stack, verdict, view
-from .store import RELATIONS, SUITE_REPOSITORY, RegistryError, Store, Testcase, default_path
+from .store import (
+    CHECK_SUITES,
+    RELATIONS,
+    SUITE_REPOSITORY,
+    WRITE_SUITES,
+    RegistryError,
+    Store,
+    Testcase,
+    default_path,
+    is_cci_suite,
+    normalize_suite,
+)
+
+CCI_HISTORY_REASON = "test_sql_by_cci has no Chronicle suite; history skipped"
+
+
+def _shard_key(shard: str | int) -> str:
+    return str(shard).lstrip("0") or "0"
 
 EPILOG = """\
 examples:
@@ -29,6 +46,10 @@ def resolve(store: Store, case: str, suite: str | None, *, create: bool) -> Test
     Without `create`, an identity the registry has not stored yet comes back with id -1, which
     matches no record. Read commands use that so they never write.
     """
+    case = case.strip()
+    while case.startswith("./"):
+        case = case[2:]
+    suite = normalize_suite(suite)
     if "/" in case:
         suite = suite or case.split("/", 1)[0]
         if suite not in SUITE_REPOSITORY:
@@ -63,7 +84,8 @@ def emit(args, data, text):
 
 def cmd_show(args, store):
     tc = resolve(store, args.case, args.suite, create=False)
-    v = view.build(store, tc, days=args.days, show_all=args.all)
+    fetched = chronicle.ChronicleError(CCI_HISTORY_REASON) if is_cci_suite(args.suite) else None
+    v = view.build(store, tc, days=args.days, show_all=args.all, fetched=fetched)
     emit(args, v, view.render(v))
 
 
@@ -81,7 +103,7 @@ def _hits(store, rules, *, job, stack_text, engine, engine_repo, offline, cache)
                 if key not in cache:
                     cache[key] = verdict.read_issue(rule["issue"])
                 issue = cache[key]
-            if issue and issue.resolution == "Fixed":
+            if issue and issue.resolution in verdict.FIXED_RESOLUTIONS:
                 key = ("fix", rule["issue"], engine)
                 if key not in cache:
                     cache[key] = verdict.read_fix(rule["issue"], engine, engine_repo)
@@ -103,23 +125,26 @@ def cmd_check(args, store):
         return check_attempt(args, store)
     stack_text = Path(args.stack_file).read_text(errors="replace") if args.stack_file else None
     tc = None
+    cci = is_cci_suite(args.suite)
+    job = "sql_by_cci" if (args.case and cci) else args.job
     if args.case:
         tc = resolve(store, args.case, args.suite, create=False)
-        rules = store.rules(tc=tc)
+        rules = store.rules(tc=tc) + (store.job_rules() if cci else [])
     else:
         rules = store.job_rules()
-    hits = _hits(store, rules, job=args.job, stack_text=stack_text, engine=args.engine,
+    hits = _hits(store, rules, job=job, stack_text=stack_text, engine=args.engine,
                  engine_repo=args.engine_repo, offline=args.offline, cache={})
     result = {
         "verdict": _overall(hits),
         "hits": [h.as_dict() for h in hits],
         "engine": args.engine,
         "case": tc.path if tc else args.case,
-        "job": args.job,
+        "job": job,
         "stack_given": stack_text is not None,
     }
     if tc and not args.no_context:
-        result["context"] = view.build(store, tc)
+        fetched = chronicle.ChronicleError(CCI_HISTORY_REASON) if cci else None
+        result["context"] = view.build(store, tc, fetched=fetched)
     lines = [f"verdict: {result['verdict']}"]
     for h in hits:
         lines.append(f"  rule {h.rule_id} ({h.issue or 'no issue'}): {h.verdict}. {h.reason}.")
@@ -133,10 +158,10 @@ def check_attempt(args, store):
     """Check every failure of one collected CI attempt suite."""
     bundle = attempt.load(args.ci_attempt)
     failures = bundle["failures"]
-    keys = sorted({(f["suite"], f["path"]) for f in failures
-                   if attempt.CHRONICLE_SUITE[f["suite"]]})
+    all_keys = sorted({(f["suite"], f["path"]) for f in failures})
     # One testcase view per testcase, even when it failed in several shards. tcc is the slow part.
-    tcs = {k: resolve(store, k[1], attempt.CHRONICLE_SUITE[k[0]], create=False) for k in keys}
+    tcs = {k: resolve(store, k[1], attempt.RULE_SUITE[k[0]], create=False) for k in all_keys}
+    chronicle_keys = [k for k in all_keys if attempt.CHRONICLE_SUITE[k[0]]]
 
     def fetch(k):
         try:
@@ -145,16 +170,14 @@ def check_attempt(args, store):
             return e
 
     with ThreadPoolExecutor(max_workers=4) as pool:
-        fetched = dict(zip(keys, pool.map(fetch, keys), strict=True))
-    views = {k: view.build(store, tcs[k], fetched=fetched[k]) for k in keys}
+        fetched = dict(zip(chronicle_keys, pool.map(fetch, chronicle_keys), strict=True))
+    views = {k: view.build(store, tcs[k], fetched=fetched[k]) for k in chronicle_keys}
     cache, entries = {}, []
     for f in failures:
         k = (f["suite"], f["path"])
         job = f"shard {f['suite'].removeprefix('test_')} {f['shard']}"
         stack_text = f["message"] or None  # the failure text, whether or not a stack parsed
-        rules = store.job_rules()
-        if k in tcs:
-            rules = store.rules(tc=tcs[k]) + rules
+        rules = store.rules(tc=tcs[k]) + store.job_rules()
         hits = _hits(store, rules, job=job, stack_text=stack_text, engine=f["engine_sha"],
                      engine_repo=args.engine_repo, offline=args.offline, cache=cache)
         overall = _overall(hits)
@@ -169,7 +192,7 @@ def check_attempt(args, store):
             "stack_found": bool(stack_text and stack.parse_stacks(stack_text)),
             "history": _history_counts(views.get(k)),
         }
-        if args.record and k in tcs:
+        if args.record and k in fetched:
             entry["record"] = _record(store, tcs[k], fetched[k], f, stack_text)
         entries.append(entry)
     counts = {}
@@ -184,8 +207,14 @@ def check_attempt(args, store):
                      + ("; its failures are in that attempt" if not entries else ""))
     for e in entries:
         i, h = e["identity"], e["history"]
-        past = (f"{h['failures']} failures, {view.passes_text(h['passes'])}"
-                if h["available"] else h["reason"])
+        if not h["available"]:
+            past = h["reason"]
+        elif h.get("status") == "NOT_INDEXED":
+            past = f"NOT_INDEXED, freshness {h.get('freshness') or 'UNKNOWN'}"
+        else:
+            past = f"{h['failures']} failures, {view.passes_text(h['passes'])}"
+            if h.get("freshness") in ("STALE", "UNKNOWN"):
+                past += f", {h['freshness'].lower()}"
         lines.append(f"  {e['verdict']:11} shard {i['shard']} {i['path']} ({past})")
         lines.append(f"              {e['reason']}"
                      + (f" [record: {e['record']['result']}]" if "record" in e else ""))
@@ -198,13 +227,13 @@ def _counts_text(counts):
 
 def _history_counts(v):
     if v is None:
-        return {"available": False,
-                "reason": "test_sql_by_cci has no Chronicle suite; history skipped"}
+        return {"available": False, "reason": CCI_HISTORY_REASON}
     h = v["history"]
     if not h["available"]:
         return {"available": False, "reason": h["reason"]}
     a = h["all_failures"]
-    return {"available": True, "failures": a["count"], "passes": h["pass_count"],
+    return {"available": True, "status": h.get("status"), "freshness": h.get("freshness"),
+            "sync_hint": h.get("sync_hint"), "failures": a["count"], "passes": h["pass_count"],
             "first": a["first"], "last": a["last"], "by_branch": a["by_branch"],
             "by_signature": a["by_signature"]}
 
@@ -220,9 +249,9 @@ def _record(store, tc, fetched, f, stack_text):
     if isinstance(fetched, Exception):
         return {"result": "no_occurrence", "reason": str(fetched)}
     found = [chronicle.occurrence(o) for o in fetched[0].get("occurrences", [])]
-    shard = f["shard"].lstrip("0")
+    shard = _shard_key(f["shard"])
     found = [o for o in found if o["run_id"] == f["run"] and o["attempt"] in (None, f["attempt"])
-             and o["shard"].lstrip("0") == shard and o["outcome"] in chronicle.FAILED]
+             and _shard_key(o["shard"]) == shard and o["outcome"] in chronicle.FAILED]
     if len(found) != 1:
         return {"result": "no_occurrence", "reason": f"Chronicle has {len(found)} failed "
                 f"occurrences for run {f['run']} shard {f['shard']}; sync the run first"}
@@ -288,9 +317,10 @@ def _find_occurrence(tc, args):
     except chronicle.ChronicleError as e:
         raise RegistryError(f"cannot read the occurrence from Chronicle: {e}") from e
     found = [chronicle.occurrence(o) for o in hist.get("occurrences", [])]
-    found = [o for o in found if o["run_id"] == args.run and o["shard"] == str(args.shard)
+    shard = _shard_key(args.shard)
+    found = [o for o in found if o["run_id"] == args.run and _shard_key(o["shard"]) == shard
              and o["outcome"] in chronicle.FAILED
-             and (args.attempt is None or o["attempt"] == args.attempt)]
+             and (args.attempt is None or o["attempt"] in (None, args.attempt))]
     if len(found) != 1:
         raise RegistryError(
             f"Chronicle has {len(found)} failed occurrences for run {args.run} shard {args.shard}."
@@ -349,8 +379,8 @@ def audit_rule(rule, issue, today):
             flags.append("expired")
         elif days <= EXPIRY_WARN_DAYS:
             flags.append(f"expires within {EXPIRY_WARN_DAYS} days")
-    if issue is not None and issue.readable and issue.resolution == "Fixed":
-        flags.append("issue resolved Fixed: retire the rule or expect fix_* verdicts")
+    if issue is not None and issue.readable and issue.resolution in verdict.FIXED_RESOLUTIONS:
+        flags.append(f"issue resolved {issue.resolution}: retire the rule or expect fix_* verdicts")
     out["flags"] = flags
     return out
 
@@ -446,13 +476,13 @@ def parser() -> argparse.ArgumentParser:
 
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
-    def case_args(sp, required=True):
+    def case_args(sp, required=True, suites=WRITE_SUITES):
         sp.add_argument("case", nargs=None if required else "?",
                         help="full testcase path, or a fragment Chronicle resolves")
-        sp.add_argument("--suite", choices=sorted(SUITE_REPOSITORY))
+        sp.add_argument("--suite", choices=suites)
 
     s = add(sub, "show", help="everything known about one testcase")
-    case_args(s)
+    case_args(s, suites=CHECK_SUITES)
     g = s.add_mutually_exclusive_group()
     g.add_argument("--days", type=int, help="list only failures of the last N days")
     g.add_argument("--all", action="store_true", help="list every indexed failure")
@@ -465,7 +495,7 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--ci-attempt", metavar="DIR",
                    help="check every failure of one suite directory collected by cubrid-ci"
                         " (reads summary.json and failures/*; engine SHA comes from the shard)")
-    s.add_argument("--suite", choices=sorted(SUITE_REPOSITORY))
+    s.add_argument("--suite", choices=CHECK_SUITES)
     s.add_argument("--engine", help="tested Engine commit (--case and --job)")
     s.add_argument("--record", action="store_true",
                    help="with --ci-attempt, attach a signature to each occurrence that matches"
@@ -551,12 +581,16 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    store = None
     try:
         store = Store(args.database or default_path(), args.actor)
         args.func(args, store)
     except (RegistryError, OSError) as e:
         print(json.dumps({"error": str(e)}) if args.json else f"error: {e}", file=sys.stderr)
         sys.exit(2)
+    finally:
+        if store is not None:
+            store.db.close()
 
 
 if __name__ == "__main__":

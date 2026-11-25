@@ -11,6 +11,9 @@ METADATA_VERSIONS = (2,)
 # CI suite name -> Chronicle suite. test_sql_by_cci has no Chronicle suite.
 CHRONICLE_SUITE = {"test_sql": "sql", "test_medium": "medium", "test_shell": "shell",
                    "test_sql_by_cci": None}
+# CI suite name -> registry testcase suite for signature rule lookup.
+RULE_SUITE = {"test_sql": "sql", "test_medium": "medium", "test_shell": "shell",
+              "test_sql_by_cci": "sql"}
 
 
 def _read(path: Path, what: str, versions: tuple[int, ...]) -> dict:

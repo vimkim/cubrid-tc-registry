@@ -83,6 +83,7 @@ def rule(**kw):
 
 OPEN = verdict.IssueFacts(True, "Open", None)
 FIXED = verdict.IssueFacts(True, "Resolved", "Fixed")
+DONE = verdict.IssueFacts(True, "Resolved", "Done")
 TODAY = date(2026, 11, 11)
 
 
@@ -110,6 +111,9 @@ class DecideTest(unittest.TestCase):
             (rule(), "match", FIXED, fix_in, "fix_present"),
             (rule(), "match", FIXED, fix_out, "fix_missing"),
             (rule(), "match", FIXED, fix_unk, "unknown"),
+            (rule(), "match", DONE, fix_in, "fix_present"),
+            (rule(), "match", DONE, fix_out, "fix_missing"),
+            (rule(), "match", DONE, fix_unk, "unknown"),
         ]
         for r, scope, issue, fix, want in cases:
             with self.subTest(scope=scope, issue=issue, fix=fix, want=want):
@@ -227,10 +231,14 @@ class AuditRuleTest(unittest.TestCase):
     def test_flags(self):
         today = date(2026, 11, 19)
         fixed = verdict.IssueFacts(True, "Closed", "Fixed")
+        done = verdict.IssueFacts(True, "Resolved", "Done")
         open_ = verdict.IssueFacts(True, "Open", None)
         a = cli.audit_rule(self.rule(), fixed, today)
         self.assertEqual(len(a["flags"]), 1)
         self.assertIn("Fixed", a["flags"][0])
+        a_done = cli.audit_rule(self.rule(), done, today)
+        self.assertEqual(len(a_done["flags"]), 1)
+        self.assertIn("Done", a_done["flags"][0])
         a = cli.audit_rule(self.rule(expires="2026-12-03"), open_, today)
         self.assertEqual((a["days_to_expiry"], len(a["flags"])), (14, 1))
         a = cli.audit_rule(self.rule(expires="2026-12-04"), open_, today)
@@ -530,6 +538,74 @@ class CliTest(CliBase):
         offline = self.run_cli("check", "--job", "x", "--engine", "cd24a21", "--offline")
         self.assertEqual(offline["verdict"], "no_match")
 
+    def test_suite_aliases_path_normalization_and_done_resolution(self):
+        sql_case = "sql/_36_guava/cbrd_27748/cases/cbrd_27748.sql"
+        self.run_cli("signature", "add", f"./{sql_case}", "--suite", "test_sql",
+                     "--id", "plan-diff", "--label", "plan diff",
+                     "--text", "+/* ---> skip ORDER BY */")
+        self.run_cli("note", sql_case, "--suite", "test_sql", "--body", "seen on develop")
+        self.run_cli("link", sql_case, "--suite", "test_sql",
+                     "--issue", "CBRD-27748", "--relation", "origin")
+        self.run_cli("rule", "add", "--id", "r-sql", "--signature", "plan-diff",
+                     "--expires", "2099-01-01", "--not-covered", "-", "--yes",
+                     "--approved-by", "user")
+        self.run_cli("rule", "add", "--id", "cci", "--job-contains", "sql_by_cci",
+                     "--expires", "2099-01-01", "--not-covered", "-", "--yes",
+                     "--approved-by", "user")
+        msg = Path(self.tmp.name) / "sql.txt"
+        msg.write_text("+/* ---> skip ORDER BY */")
+        for s in ("sql_by_cci", "test_sql_by_cci"):
+            with mock.patch.object(cli.chronicle, "history_and_status") as hist:
+                out = self.run_cli("check", "--case", sql_case, "--suite", s,
+                                   "--engine", "cd24a21", "--stack-file", str(msg), "--offline")
+            hist.assert_not_called()
+            self.assertEqual(out["verdict"], "known")
+            self.assertEqual({h["verdict"] for h in out["hits"]}, {"known", "known_job"})
+            self.assertFalse(out["context"]["history"]["available"])
+            shown = self.run_cli("show", f"./{sql_case}", "--suite", s)
+            self.assertFalse(shown["history"]["available"])
+            self.assertEqual(len(shown["signatures"]), 1)
+
+        # Done resolution triggers fix-commit check just like Fixed.
+        fix_done = verdict.IssueFacts(True, "Resolved", "Done")
+        self.run_cli("signature", "add", f"./{CASE}", "--suite", "test_shell",
+                     "--id", "done-sig", "--label", "l", "--text", "NOK done")
+        self.run_cli("rule", "add", "--id", "r-done", "--signature", "done-sig",
+                     "--issue", "CBRD-28117", "--not-covered", "-", "--yes",
+                     "--approved-by", "user")
+        shell_msg = Path(self.tmp.name) / "shell.txt"
+        shell_msg.write_text("NOK done")
+        with (mock.patch.object(cli.verdict, "read_issue", return_value=fix_done),
+              mock.patch.object(cli.verdict, "read_fix",
+                                return_value=verdict.FixFacts(False, "lacks fix"))):
+            res = self.run_cli("check", "--case", CASE, "--suite", "test_shell",
+                               "--engine", "cd24a21", "--stack-file", str(shell_msg),
+                               "--no-context")
+        self.assertEqual(res["verdict"], "fix_missing")
+
+    def test_signature_attach_normalizes_shard_and_null_attempt(self):
+        fake = {
+            "schema_version": 2,
+            "occurrences": [{
+                "repository": "CUBRID/cubrid", "run_id": 99, "attempt": None,
+                "shard": "9", "ordinal": 0, "outcome": "FAIL",
+                "completed_at": "2026-11-25T12:00:00Z", "engine_sha": "abc",
+                "build_mode": "debug", "pull_request": {"number": 1, "base_ref": "develop"},
+                "evidence": "failed.list",
+            }],
+        }
+        self.run_cli("signature", "add", CASE, "--suite", "test_shell",
+                     "--id", "s", "--label", "l", "--text", "NOK line")
+        msg = Path(self.tmp.name) / "nok.txt"
+        msg.write_text("NOK line\n")
+        status = {"schema_version": 1, "status": "FAILING", "freshness": {}}
+        with mock.patch.object(cli.chronicle, "history_and_status", return_value=(fake, status)):
+            res = self.run_cli("signature", "attach", CASE, "--suite", "shell",
+                               "--run", "99", "--shard", "09", "--attempt", "1",
+                               "--stack-file", str(msg))
+        self.assertEqual(res["result"], "added")
+        self.assertEqual(res["signature"], "s")
+
 
 CORE_CASE = "shell/_06_issues/_26_2h/cbrd_26916/cases/cbrd_26916.sh"
 CORE_FRAMES = ["aj_execquery_get_exec_time", "aj_execquery_handler", "aj_thread_r"]
@@ -673,6 +749,54 @@ class CiAttemptTest(CliBase):
         self.assertFalse(core["history"]["available"])
         self.assertIn("no Chronicle suite", core["history"]["reason"])
         self.assertNotIn("record", core)
+
+    def test_by_cci_applies_sql_signature_rules_and_falls_back_to_job_rules(self):
+        sql_known = "sql/_36_guava/cbrd_28121/cases/cbrd_28121.sql"
+        sql_other = "sql/_13_issues/_26_2h/cases/cbrd_28255.sql"
+        self.run_cli("signature", "add", sql_known, "--suite", "sql",
+                     "--id", "skip-orderby", "--label", "missing skip order by",
+                     "--text", "-  skip order by: true")
+        self.run_cli("rule", "add", "--id", "r-sql", "--signature", "skip-orderby",
+                     "--expires", "2099-01-01", "--not-covered", "-", "--yes",
+                     "--approved-by", "user")
+        self.run_cli("rule", "add", "--id", "cci", "--job-contains", "sql_by_cci",
+                     "--expires", "2099-01-01", "--not-covered", "-", "--yes",
+                     "--approved-by", "user")
+        data = json.loads((self.attempt / "summary.json").read_text())
+        f0, f1 = data["failures"][0], data["failures"][1]
+        for entry, path, msg in ((f0, sql_known, "-  skip order by: true\n"),
+                                 (f1, sql_other, "+Error:-190\n")):
+            meta_path = self.attempt / "failures" / entry["stable_id"] / "metadata.json"
+            meta = json.loads(meta_path.read_text())
+            meta["name"] = path
+            meta_path.write_text(json.dumps(meta))
+            (self.attempt / meta["message_path"]).write_text(msg)
+        data["failures"] = data["failures"][:2]
+        (self.attempt / "summary.json").write_text(
+            json.dumps(data | {"suite": "test_sql_by_cci"}))
+        out = self.run_cli("check", "--ci-attempt", str(self.attempt), "--offline", "--record")
+        self.assertEqual(self.calls(), [])
+        by = self.by_path(out)
+        self.assertEqual(by[sql_known]["verdict"], "known")
+        self.assertEqual(by[sql_other]["verdict"], "known_job")
+        self.assertNotIn("record", by[sql_known])
+
+    def test_not_indexed_history_status_is_rendered_explicitly(self):
+        exe = Path(self.tmp.name) / "cubrid-tcc"
+        exe.write_text(f"""#!{sys.executable}
+import json, sys
+if sys.argv[1] == "history":
+    print(json.dumps({{"schema_version": 2, "occurrences": []}}))
+elif sys.argv[1] == "status":
+    print(json.dumps({{"schema_version": 1, "status": "NOT_INDEXED",
+                       "freshness": {{"state": "UNKNOWN"}}}}))
+""")
+        buf = StringIO()
+        with redirect_stdout(buf):
+            cli.main(["check", "--ci-attempt", str(self.attempt), "--offline"])
+        self.assertIn("NOT_INDEXED, freshness UNKNOWN", buf.getvalue())
+        out = self.run_cli("check", "--ci-attempt", str(self.attempt), "--offline")
+        self.assertEqual(out["failures"][0]["history"]["status"], "NOT_INDEXED")
 
     def test_unknown_schema_version_exits_2(self):
         for name in ("summary.json", "failures/*/metadata.json"):

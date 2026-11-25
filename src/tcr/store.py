@@ -14,8 +14,34 @@ SUITE_REPOSITORY = {
     "medium": "CUBRID/cubrid-testcases",
     "shell": "CUBRID/cubrid-testcases-private-ex",
 }
+SUITE_ALIASES = {
+    "sql": "sql",
+    "medium": "medium",
+    "shell": "shell",
+    "test_sql": "sql",
+    "test_medium": "medium",
+    "test_shell": "shell",
+}
+CCI_SUITES = ("sql_by_cci", "test_sql_by_cci")
+WRITE_SUITES = tuple(sorted(SUITE_ALIASES))
+CHECK_SUITES = tuple(sorted((*SUITE_ALIASES, *CCI_SUITES)))
 RELATIONS = ("origin", "tracks", "suspected", "fixed_by")
 ISSUE_KEY = re.compile(r"^CBRD-\d+$")
+
+
+def is_cci_suite(suite: str | None) -> bool:
+    return bool(suite and suite.strip().lower() in CCI_SUITES)
+
+
+def normalize_suite(suite: str | None) -> str | None:
+    if suite is None:
+        return None
+    key = suite.strip().lower()
+    if key in SUITE_ALIASES:
+        return SUITE_ALIASES[key]
+    if key in CCI_SUITES:
+        return "sql"
+    raise RegistryError(f"suite must be one of {', '.join(CHECK_SUITES)}: {suite!r}")
 
 SIGNATURE_TABLE = """CREATE TABLE signature (
     id TEXT PRIMARY KEY,

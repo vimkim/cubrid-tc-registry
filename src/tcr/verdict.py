@@ -19,6 +19,7 @@ FIX_REF = "origin/develop"
 ENGINE_GITHUB = "CUBRID/cubrid"
 
 VERDICTS = ("no_match", "expired", "known", "known_job", "fix_missing", "fix_present", "unknown")
+FIXED_RESOLUTIONS = frozenset({"Fixed", "Done"})
 
 
 @dataclass(frozen=True)
@@ -91,8 +92,9 @@ def decide(rule, scope: str, today: date, issue: IssueFacts | None,
         return hit("unknown", f"the issue state is unknown: {issue.error if issue else 'offline'}")
     if issue.resolution is None:
         return hit("known", f"{rule['issue']} is {issue.status} and unresolved")
-    if issue.resolution != "Fixed":
-        return hit("unknown", f"{rule['issue']} is resolved as {issue.resolution}, not Fixed")
+    if issue.resolution not in FIXED_RESOLUTIONS:
+        return hit("unknown",
+                   f"{rule['issue']} is resolved as {issue.resolution}, not Fixed or Done")
     if fix is None or fix.present is None:
         return hit("unknown", f"fix presence is unknown: {fix.basis if fix else 'not checked'}")
     if fix.present:
