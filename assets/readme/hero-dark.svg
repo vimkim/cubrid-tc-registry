@@ -1,0 +1,220 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-labelledby="title desc">
+  <title id="title">cubrid-tcr 아키텍처 및 판정/언블록 흐름 (다크 테마)</title>
+  <desc id="desc">cubrid-tcc 실패 이력, cubrid-ci 시도 번들, JIRA/GitHub/git 실시간 상태를 바탕으로 registry.sqlite3의 시그니처, 이슈 링크, 노트, 사람 승인 Known-Issue 규칙, 블로커를 관리하고 7종 판정 및 PR 언블록을 수행하는 아키텍처 다이어그램.</desc>
+  <defs>
+    <pattern id="dot-grid-dark" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="12" cy="12" r="1" fill="#30363d" opacity="0.4"/>
+    </pattern>
+    <linearGradient id="header-glow-dark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1f6feb" stop-opacity="0.22"/>
+      <stop offset="50%" stop-color="#8957e5" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#238636" stop-opacity="0.16"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Outer Frame -->
+  <rect x="1" y="1" width="1198" height="518" rx="16" fill="#0d1117" stroke="#30363d" stroke-width="1.5"/>
+  <rect x="2" y="2" width="1196" height="516" rx="15" fill="url(#dot-grid-dark)"/>
+  <path d="M 17 2 H 1183 A 15 15 0 0 1 1198 17 V 104 H 2 V 17 A 15 15 0 0 1 17 2 Z" fill="url(#header-glow-dark)"/>
+
+  <!-- Header Left: Emblem + Title + Badge + Subtitle -->
+  <g transform="translate(40, 32)">
+    <rect x="0" y="0" width="44" height="44" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.2"/>
+    <rect x="10" y="10" width="14" height="24" rx="2.5" fill="none" stroke="#58a6ff" stroke-width="1.8"/>
+    <line x1="14" y1="16" x2="20" y2="16" stroke="#8b949e" stroke-width="1.6" stroke-linecap="round"/>
+    <line x1="14" y1="22" x2="20" y2="22" stroke="#8b949e" stroke-width="1.6" stroke-linecap="round"/>
+    <circle cx="31" cy="28" r="6.5" fill="#0d1117" stroke="#3fb950" stroke-width="1.8"/>
+    <path d="M28 28 L30.2 30.2 L34.2 25.8" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <text x="98" y="54" fill="#e6edf3" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="24" font-weight="700" letter-spacing="-0.4">cubrid-tcr</text>
+
+  <rect x="228" y="34" width="164" height="24" rx="12" fill="#388bfd" fill-opacity="0.15" stroke="#1f6feb" stroke-width="1"/>
+  <text x="310" y="50" text-anchor="middle" fill="#58a6ff" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" letter-spacing="0.6">CUBRID TC REGISTRY</text>
+
+  <text x="98" y="79" fill="#8b949e" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5">CUBRID CI 테스트케이스 지식 저장소 · Known-Issue 판정 · 블로커/언블록 추적</text>
+
+  <!-- Header Right: 5 CLI Command Pills -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="11.5" font-weight="600">
+    <rect x="782" y="40" width="60" height="30" rx="7" fill="#161b22" stroke="#30363d"/>
+    <text x="812" y="59" text-anchor="middle" fill="#e6edf3">show</text>
+
+    <rect x="850" y="40" width="66" height="30" rx="7" fill="#388bfd" fill-opacity="0.14" stroke="#1f6feb"/>
+    <text x="883" y="59" text-anchor="middle" fill="#58a6ff">check</text>
+
+    <rect x="924" y="40" width="76" height="30" rx="7" fill="#8957e5" fill-opacity="0.15" stroke="#8957e5"/>
+    <text x="962" y="59" text-anchor="middle" fill="#bc8cff">blocker</text>
+
+    <rect x="1008" y="40" width="78" height="30" rx="7" fill="#2ea043" fill-opacity="0.15" stroke="#238636"/>
+    <text x="1047" y="59" text-anchor="middle" fill="#3fb950">unblock</text>
+
+    <rect x="1094" y="40" width="66" height="30" rx="7" fill="#bb8009" fill-opacity="0.15" stroke="#9e6a03"/>
+    <text x="1127" y="59" text-anchor="middle" fill="#e3b341">rule</text>
+  </g>
+
+  <line x1="40" y1="104" x2="1160" y2="104" stroke="#21262d" stroke-width="1.2"/>
+
+  <!-- Column 1: External Evidence & Live State -->
+  <rect x="40" y="122" width="320" height="252" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.2"/>
+  <circle cx="58" cy="142" r="4" fill="#58a6ff"/>
+  <text x="70" y="146" fill="#58a6ff" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700">1. 외부 증거 · 실시간 상태</text>
+
+  <!-- Sub-card 1A: CI History & Attempt -->
+  <rect x="54" y="158" width="292" height="94" rx="8" fill="#0d1117" stroke="#21262d" stroke-width="1"/>
+  <text x="66" y="176" fill="#e6edf3" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600">CI 이력 및 시도 번들</text>
+
+  <rect x="66" y="186" width="88" height="24" rx="5" fill="#388bfd" fill-opacity="0.14" stroke="#1f6feb"/>
+  <text x="110" y="202" text-anchor="middle" fill="#58a6ff" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="10.5" font-weight="600">cubrid-tcc</text>
+  <text x="162" y="202" fill="#8b949e" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5">실패 이력 조회 (중복 수집 없음)</text>
+
+  <rect x="66" y="218" width="88" height="24" rx="5" fill="#161b22" stroke="#30363d"/>
+  <text x="110" y="234" text-anchor="middle" fill="#e6edf3" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="10.5" font-weight="600">cubrid-ci</text>
+  <text x="162" y="234" fill="#8b949e" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5">시도 번들 일괄 검사 (--ci-attempt)</text>
+
+  <!-- Sub-card 1B: Live JIRA / GitHub / Git -->
+  <rect x="54" y="260" width="292" height="102" rx="8" fill="#0d1117" stroke="#21262d" stroke-width="1"/>
+  <text x="66" y="278" fill="#e6edf3" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600">실시간 이슈 · PR · 코드 반영</text>
+
+  <g font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" fill="#8b949e">
+    <path d="M66 297 L69.5 300.5 L76 293.5" fill="none" stroke="#3fb950" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="83" y="300"><tspan fill="#e6edf3" font-weight="600">JIRA</tspan> (jira.cubrid.org) 상태·해결·담당자</text>
+
+    <path d="M66 319 L69.5 322.5 L76 315.5" fill="none" stroke="#3fb950" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="83" y="322"><tspan fill="#e6edf3" font-weight="600">GitHub GraphQL</tspan> &amp; <tspan fill="#e6edf3" font-weight="600">cubrid-xref</tspan> 수정 PR</text>
+
+    <path d="M66 341 L69.5 344.5 L76 337.5" fill="none" stroke="#3fb950" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="83" y="344"><tspan fill="#e6edf3" font-weight="600">로컬 git</tspan> (수정 커밋 포함 여부 비교)</text>
+  </g>
+
+  <!-- Connector 1 -> 2 -->
+  <line x1="364" y1="248" x2="394" y2="248" stroke="#58a6ff" stroke-width="2"/>
+  <polygon points="402,248 392,242 392,254" fill="#58a6ff"/>
+
+  <!-- Column 2: Curated Knowledge DB -->
+  <rect x="404" y="122" width="364" height="252" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.2"/>
+  <circle cx="422" cy="142" r="4" fill="#bc8cff"/>
+  <text x="434" y="146" fill="#bc8cff" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700">2. 큐레이션 지식 DB (registry.sqlite3)</text>
+
+  <!-- Sub-card 2A: Knowledge & Blocker Tables -->
+  <rect x="418" y="158" width="336" height="122" rx="8" fill="#0d1117" stroke="#21262d" stroke-width="1"/>
+  <text x="430" y="176" fill="#e6edf3" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600">테스트케이스 지식 &amp; 블로커 추적</text>
+
+  <g font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" fill="#8b949e">
+    <text x="430" y="196"><tspan fill="#58a6ff" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-weight="600">signature</tspan> — 스택 프레임 / NOK 텍스트 태깅</text>
+    <text x="430" y="214"><tspan fill="#58a6ff" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-weight="600">issue_link</tspan> — origin · tracks · suspected · fixed_by</text>
+    <text x="430" y="232"><tspan fill="#58a6ff" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-weight="600">note</tspan> — append-only 분석 메모 및 참조 링크</text>
+    <text x="430" y="250"><tspan fill="#bc8cff" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-weight="600">blocker</tspan> — 원인 커밋(culprit) · 수정 PR · 담당자</text>
+    <text x="430" y="268"><tspan fill="#3fb950" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-weight="600">event</tspan> — 모든 쓰기 변경 전후(before/after) 감사 로그</text>
+  </g>
+
+  <!-- Sub-card 2B: Human-Approved Known-Issue Rules -->
+  <rect x="418" y="288" width="336" height="74" rx="8" fill="#8957e5" fill-opacity="0.09" stroke="#8957e5" stroke-opacity="0.55" stroke-width="1"/>
+  <text x="430" y="307" fill="#e6edf3" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600">Known-Issue 규칙 (<tspan font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" fill="#bc8cff">rule</tspan>)</text>
+
+  <rect x="654" y="294" width="88" height="18" rx="9" fill="#8957e5" fill-opacity="0.22" stroke="#8957e5"/>
+  <text x="698" y="307" text-anchor="middle" fill="#bc8cff" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="9.5" font-weight="700">사람 승인 필수</text>
+
+  <text x="430" y="328" fill="#e6edf3" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5">시그니처 또는 --job-contains 대상 · 유일하게 판정 변경</text>
+  <text x="430" y="347" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="10">--yes --approved-by NAME 지정 시에만 DB 반영</text>
+
+  <!-- Connector 2 -> 3 -->
+  <line x1="772" y1="248" x2="802" y2="248" stroke="#bc8cff" stroke-width="2"/>
+  <polygon points="810,248 800,242 800,254" fill="#bc8cff"/>
+
+  <!-- Column 3: Verdict & PR Unblock -->
+  <rect x="812" y="122" width="348" height="252" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.2"/>
+  <circle cx="830" cy="142" r="4" fill="#3fb950"/>
+  <text x="842" y="146" fill="#3fb950" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700">3. 판정 및 PR 언블록</text>
+
+  <!-- Sub-card 3A: 7 Verdicts -->
+  <rect x="826" y="158" width="320" height="94" rx="8" fill="#0d1117" stroke="#21262d" stroke-width="1"/>
+  <text x="838" y="176" fill="#e6edf3" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600">7종 판정 결과</text>
+  <text x="1134" y="176" text-anchor="end" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="10">cubrid-tcr check</text>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="10" font-weight="600">
+    <rect x="838" y="187" width="54" height="24" rx="6" fill="#388bfd" fill-opacity="0.14" stroke="#1f6feb"/>
+    <text x="865" y="203" text-anchor="middle" fill="#58a6ff">known</text>
+
+    <rect x="897" y="187" width="76" height="24" rx="6" fill="#388bfd" fill-opacity="0.14" stroke="#1f6feb"/>
+    <text x="935" y="203" text-anchor="middle" fill="#58a6ff">known_job</text>
+
+    <rect x="978" y="187" width="78" height="24" rx="6" fill="#bb8009" fill-opacity="0.14" stroke="#9e6a03"/>
+    <text x="1017" y="203" text-anchor="middle" fill="#e3b341">fix_missing</text>
+
+    <rect x="1061" y="187" width="73" height="24" rx="6" fill="#da3633" fill-opacity="0.14" stroke="#da3633"/>
+    <text x="1097.5" y="203" text-anchor="middle" fill="#f85149">fix_present</text>
+
+    <rect x="838" y="217" width="92" height="24" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="884" y="233" text-anchor="middle" fill="#8b949e">expired</text>
+
+    <rect x="936" y="217" width="98" height="24" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="985" y="233" text-anchor="middle" fill="#8b949e">no_match</text>
+
+    <rect x="1040" y="217" width="94" height="24" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="1087" y="233" text-anchor="middle" fill="#8b949e">unknown</text>
+  </g>
+
+  <!-- Sub-card 3B: Blockers & Unblock -->
+  <rect x="826" y="260" width="320" height="102" rx="8" fill="#2ea043" fill-opacity="0.09" stroke="#238636" stroke-width="1"/>
+  <text x="838" y="278" fill="#e6edf3" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600">블로커 현황판 &amp; PR 언블록</text>
+
+  <rect x="1052" y="265" width="82" height="18" rx="9" fill="#2ea043" fill-opacity="0.22" stroke="#238636"/>
+  <text x="1093" y="278" text-anchor="middle" fill="#3fb950" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="9.5" font-weight="700">unblock --pr</text>
+
+  <text x="838" y="297" fill="#8b949e" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10">blockers 실시간 준비 상태 -&gt; PR 다음 행동:</text>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="9.5" font-weight="600">
+    <rect x="838" y="306" width="110" height="22" rx="5" fill="#0d1117" stroke="#238636"/>
+    <text x="893" y="321" text-anchor="middle" fill="#3fb950">REBASE_ENGINE</text>
+
+    <rect x="954" y="306" width="180" height="22" rx="5" fill="#0d1117" stroke="#238636"/>
+    <text x="1044" y="321" text-anchor="middle" fill="#3fb950">REBASE_ENGINE_AND_SYNC_TC</text>
+
+    <rect x="838" y="333" width="164" height="22" rx="5" fill="#0d1117" stroke="#1f6feb"/>
+    <text x="920" y="348" text-anchor="middle" fill="#58a6ff">RERUN_OR_SYNC_TC</text>
+
+    <rect x="1008" y="333" width="126" height="22" rx="5" fill="#0d1117" stroke="#30363d"/>
+    <text x="1071" y="348" text-anchor="middle" fill="#e6edf3">RETIRE_RULE</text>
+  </g>
+
+  <!-- Bottom Left Card: Safety Principle -->
+  <rect x="40" y="390" width="548" height="106" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.2"/>
+  <text x="56" y="412" fill="#e6edf3" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700">안전 원칙 · 참조와 판정의 분리</text>
+  <rect x="460" y="397" width="112" height="20" rx="10" fill="#8957e5" fill-opacity="0.16" stroke="#8957e5"/>
+  <text x="516" y="411" text-anchor="middle" fill="#bc8cff" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10" font-weight="600">사람 승인 필수</text>
+
+  <rect x="56" y="423" width="516" height="28" rx="6" fill="#0d1117" stroke="#21262d"/>
+  <text x="68" y="441" fill="#58a6ff" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="10.5" font-weight="600">signature / link / note -&gt; 자유 기록</text>
+  <text x="560" y="441" text-anchor="end" fill="#e3b341" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="10.5" font-weight="700">rule -&gt; --yes --approved-by</text>
+
+  <text x="56" y="469" fill="#8b949e" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5">link는 참고용일 뿐 CI 판정을 바꾸지 않습니다. 오직 승인된 rule만 판정을 변경합니다.</text>
+  <text x="56" y="485" fill="#8b949e" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5">모든 쓰기 작업은 event 감사 로그에 작업자(actor)와 변경 전후를 기록합니다.</text>
+
+  <!-- Bottom Right Card: Operational Contract & Exit Codes -->
+  <rect x="604" y="390" width="556" height="106" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.2"/>
+  <text x="620" y="412" fill="#e6edf3" font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700">실행 규약 · 멱등 쓰기</text>
+  <rect x="1044" y="397" width="100" height="20" rx="10" fill="#21262d" stroke="#30363d"/>
+  <text x="1094" y="411" text-anchor="middle" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="10" font-weight="600">exit 0 / 2</text>
+
+  <g font-family="'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5">
+    <rect x="620" y="425" width="258" height="26" rx="6" fill="#0d1117" stroke="#238636"/>
+    <rect x="625" y="429" width="22" height="18" rx="4" fill="#2ea043" fill-opacity="0.22"/>
+    <text x="636" y="442" text-anchor="middle" fill="#3fb950" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="11" font-weight="700">0</text>
+    <text x="655" y="442" fill="#e6edf3" font-weight="600">모든 판정 완료 (known · no_match)</text>
+
+    <rect x="886" y="425" width="258" height="26" rx="6" fill="#0d1117" stroke="#da3633"/>
+    <rect x="891" y="429" width="22" height="18" rx="4" fill="#f85149" fill-opacity="0.20"/>
+    <text x="902" y="442" text-anchor="middle" fill="#f85149" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="11" font-weight="700">2</text>
+    <text x="921" y="442" fill="#e6edf3">인자 · 환경 · 운영 오류</text>
+
+    <rect x="620" y="458" width="258" height="26" rx="6" fill="#0d1117" stroke="#9e6a03"/>
+    <rect x="625" y="462" width="22" height="18" rx="4" fill="#bb8009" fill-opacity="0.22"/>
+    <text x="636" y="475" text-anchor="middle" fill="#e3b341" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="11" font-weight="700">1</text>
+    <text x="655" y="475" fill="#e6edf3">validate 무결성 불일치</text>
+
+    <rect x="886" y="458" width="258" height="26" rx="6" fill="#0d1117" stroke="#1f6feb"/>
+    <rect x="891" y="462" width="22" height="18" rx="4" fill="#388bfd" fill-opacity="0.20"/>
+    <text x="902" y="475" text-anchor="middle" fill="#58a6ff" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="11" font-weight="700">=</text>
+    <text x="921" y="475" fill="#e6edf3">동일 쓰기 재실행 시 unchanged</text>
+  </g>
+</svg>
