@@ -4,30 +4,36 @@ import argparse
 import getpass
 import json
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from . import __version__, attempt, chronicle, stack, verdict, view
+from . import __version__, attempt, chronicle, live, readiness, render, stack, verdict, view
 from .store import (
     CHECK_SUITES,
+    CONFIDENCES,
     RELATIONS,
     SUITE_REPOSITORY,
     WRITE_SUITES,
     RegistryError,
     Store,
     Testcase,
+    check_repo,
     default_path,
     is_cci_suite,
     normalize_suite,
+    parse_pr_ref,
 )
 
 CCI_HISTORY_REASON = "test_sql_by_cci has no Chronicle suite; history skipped"
+_HEX_SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 
 def _shard_key(shard: str | int) -> str:
     return str(shard).lstrip("0") or "0"
+
 
 EPILOG = """\
 examples:
@@ -35,8 +41,10 @@ examples:
   cubrid-tcr check --case cbrd_27179 --suite shell --engine cd24a21 --stack-file core.txt
   cubrid-tcr check --job "shard sql_by_cci 01" --engine cd24a21
   cubrid-tcr check --ci-attempt ~/.local/share/cubrid-ci-data/.../attempts/1/test_shell --record
+  cubrid-tcr blocker add CBRD-28395 --culprit engine#8537 --fix-issue CBRD-28395 --signature s
+  cubrid-tcr blockers --affected-days 7
+  cubrid-tcr unblock --pr 8753
   cubrid-tcr rules --audit
-  cubrid-tcr note cbrd_27179 --suite shell --body "Also failed on PR #8404"
 """
 
 
@@ -85,30 +93,55 @@ def emit(args, data, text):
 def cmd_show(args, store):
     tc = resolve(store, args.case, args.suite, create=False)
     fetched = chronicle.ChronicleError(CCI_HISTORY_REASON) if is_cci_suite(args.suite) else None
-    v = view.build(store, tc, days=args.days, show_all=args.all, fetched=fetched)
+    v = view.build(store, tc, days=args.days, show_all=args.all, fetched=fetched,
+                   live_lookup=args.live)
     emit(args, v, view.render(v))
 
 
-def _hits(store, rules, *, job, stack_text, engine, engine_repo, offline, cache):
-    """Evaluate rules for one failure. `cache` holds Jira and fix reads shared by a batch."""
+def _hits(store, rules, *, job, stack_text, engine, engine_repo, offline, cache,
+          tc_sha=None, tc_repo=None):
+    """Evaluate rules for one failure. `cache` holds Jira, PR, and fix reads shared by a batch."""
     today = date.today()
     hits = []
     for rule in rules:
         sig = store.signature(rule["signature_id"]) if rule["signature_id"] else None
         scope = verdict.scope_matches(rule, job=job, stack_text=stack_text, signature=sig)
-        issue = fix = None
-        if scope == "match" and rule["issue"]:
-            if not offline:
+        blocker = store.blocker_for_rule(rule)
+        issue = fix = blocker_fix = open_reason = None
+        if scope == "match":
+            if not offline and blocker and blocker.get("prs"):
+                req_refs = tuple(sorted(
+                    (p["repository"], p["pr_number"])
+                    for p in blocker["prs"]
+                    if not p.get("retired_at") and p.get("required", 1)
+                ))
+                if req_refs:
+                    if ("prs", req_refs) not in cache:
+                        cache[("prs", req_refs)] = live.read_prs_batch(req_refs)
+                    blocker_fix, open_reason = verdict.read_blocker_fix(
+                        blocker,
+                        engine_sha=engine,
+                        tc_sha=tc_sha,
+                        tc_repo=tc_repo,
+                        engine_repo=engine_repo,
+                        pr_facts_map=cache[("prs", req_refs)],
+                    )
+            if not offline and rule["issue"]:
                 key = ("issue", rule["issue"])
                 if key not in cache:
                     cache[key] = verdict.read_issue(rule["issue"])
                 issue = cache[key]
-            if issue and issue.resolution in verdict.FIXED_RESOLUTIONS:
+            if blocker_fix is None and issue and issue.resolution in verdict.FIXED_RESOLUTIONS:
                 key = ("fix", rule["issue"], engine)
                 if key not in cache:
                     cache[key] = verdict.read_fix(rule["issue"], engine, engine_repo)
                 fix = cache[key]
-        h = verdict.decide(rule, scope, today, issue, fix)
+        h = verdict.decide(
+            rule, scope, today, issue, fix,
+            blocker_id=blocker["id"] if blocker else None,
+            blocker_fix=blocker_fix,
+            open_blocker_reason=open_reason,
+        )
         if h:
             hits.append(h)
     return hits
@@ -133,7 +166,8 @@ def cmd_check(args, store):
     else:
         rules = store.job_rules()
     hits = _hits(store, rules, job=job, stack_text=stack_text, engine=args.engine,
-                 engine_repo=args.engine_repo, offline=args.offline, cache={})
+                 engine_repo=args.engine_repo, offline=args.offline, cache={},
+                 tc_sha=args.tc_sha, tc_repo=tc.repository if tc else None)
     result = {
         "verdict": _overall(hits),
         "hits": [h.as_dict() for h in hits],
@@ -147,7 +181,10 @@ def cmd_check(args, store):
         result["context"] = view.build(store, tc, fetched=fetched)
     lines = [f"verdict: {result['verdict']}"]
     for h in hits:
-        lines.append(f"  rule {h.rule_id} ({h.issue or 'no issue'}): {h.verdict}. {h.reason}.")
+        b_tag = f" [blocker {h.blocker_id}]" if h.blocker_id else ""
+        lines.append(
+            f"  rule {h.rule_id} ({h.issue or 'no issue'}{b_tag}): {h.verdict}. {h.reason}."
+        )
         lines.append(f"    not covered: {h.not_covered}")
     if "context" in result:
         lines += ["", view.render(result["context"])]
@@ -179,7 +216,8 @@ def check_attempt(args, store):
         stack_text = f["message"] or None  # the failure text, whether or not a stack parsed
         rules = store.rules(tc=tcs[k]) + store.job_rules()
         hits = _hits(store, rules, job=job, stack_text=stack_text, engine=f["engine_sha"],
-                     engine_repo=args.engine_repo, offline=args.offline, cache=cache)
+                     engine_repo=args.engine_repo, offline=args.offline, cache=cache,
+                     tc_sha=f.get("testcase_sha"), tc_repo=tcs[k].repository)
         overall = _overall(hits)
         winner = next((h for h in hits if h.verdict == overall), None)
         entry = {
@@ -341,9 +379,444 @@ def cmd_note(args, store):
     emit(args, {"result": r}, f"note: {r}")
 
 
+def _resolve_culprit_args(args) -> dict:
+    culprit_repo = check_repo(args.culprit_repo) if args.culprit_repo else None
+    culprit_commit = args.culprit_commit
+    culprit_pr = args.culprit_pr
+    culprit_issue = args.culprit_issue
+    culprit_author = args.culprit_author
+
+    if args.culprit:
+        raw = args.culprit.strip()
+        if _HEX_SHA.match(raw):
+            hydrated = ({"culprit_commit": raw} if args.offline
+                        else live.hydrate_culprit_from_commit(raw, args.engine_repo))
+        else:
+            repo, pr_num = parse_pr_ref(raw)
+            hydrated = ({"culprit_repo": repo, "culprit_pr": pr_num} if args.offline
+                        else live.hydrate_culprit_from_pr(repo, pr_num))
+        culprit_repo = culprit_repo or hydrated.get("culprit_repo")
+        culprit_pr = culprit_pr if culprit_pr is not None else hydrated.get("culprit_pr")
+        culprit_commit = culprit_commit or hydrated.get("culprit_commit")
+        culprit_issue = culprit_issue or hydrated.get("culprit_issue")
+        culprit_author = culprit_author or hydrated.get("culprit_author")
+
+    return {
+        "culprit_repo": culprit_repo,
+        "culprit_commit": culprit_commit,
+        "culprit_pr": culprit_pr,
+        "culprit_issue": culprit_issue,
+        "culprit_author": culprit_author,
+    }
+
+
+def cmd_blocker_add(args, store):
+    culprit = _resolve_culprit_args(args)
+    prs = []
+    for ref in args.pr or ():
+        repo, num = parse_pr_ref(ref)
+        prs.append((repo, num, args.target_branch, True))
+    for ref in args.pr_optional or ():
+        repo, num = parse_pr_ref(ref)
+        prs.append((repo, num, args.target_branch, False))
+    r = store.add_blocker(
+        args.id,
+        title=args.title or "",
+        **culprit,
+        culprit_confidence=args.culprit_confidence,
+        culprit_note=args.culprit_note or "",
+        fix_issue=args.fix_issue,
+        owner=args.owner,
+        prs=prs,
+        signatures=args.signature or [],
+        rules=args.rule or [],
+    )
+    emit(args, {"result": r, "blocker": args.id}, f"blocker {args.id}: {r}")
+
+
+def cmd_blocker_update(args, store):
+    culprit = _resolve_culprit_args(args)
+    updates = {
+        "title": args.title,
+        "culprit_repo": culprit["culprit_repo"],
+        "culprit_commit": culprit["culprit_commit"],
+        "culprit_pr": culprit["culprit_pr"],
+        "culprit_issue": culprit["culprit_issue"],
+        "culprit_author": culprit["culprit_author"],
+        "culprit_confidence": args.culprit_confidence,
+        "culprit_note": args.culprit_note,
+        "fix_issue": args.fix_issue,
+        "owner": args.owner,
+    }
+    r = store.update_blocker(args.id, **updates)
+    emit(args, {"result": r, "blocker": args.id}, f"blocker {args.id}: {r}")
+
+
+def cmd_blocker_retire(args, store):
+    r = store.retire_blocker(args.id, args.reason)
+    emit(args, {"result": r, "blocker": args.id}, f"blocker {args.id}: {r}")
+
+
+def cmd_blocker_pr_add(args, store):
+    repo, num = parse_pr_ref(args.pr_ref)
+    r = store.add_blocker_pr(
+        args.id, repo, num, target_branch=args.target_branch, required=not args.optional)
+    emit(args, {"result": r, "blocker": args.id, "repository": repo, "pr_number": num},
+         f"blocker {args.id} PR {repo}#{num}: {r}")
+
+
+def cmd_blocker_pr_retire(args, store):
+    repo, num = parse_pr_ref(args.pr_ref)
+    r = store.retire_blocker_pr(args.id, repo, num, args.reason)
+    emit(args, {"result": r, "blocker": args.id, "repository": repo, "pr_number": num},
+         f"blocker {args.id} PR {repo}#{num}: {r}")
+
+
+def cmd_blocker_link(args, store):
+    r = store.link_blocker(args.id, signatures=args.signature or [], rules=args.rule or [])
+    emit(args, {"result": r, "blocker": args.id}, f"blocker {args.id}: {r}")
+
+
+def cmd_blocker_show(args, store):
+    b = store.blocker(args.id, include_retired_prs=True)
+    if b is None:
+        raise RegistryError(f"no blocker {args.id}")
+    issue_facts = None
+    pr_map = {}
+    if args.live:
+        pr_refs = [(p["repository"], p["pr_number"]) for p in b["prs"] if not p["retired_at"]]
+        if pr_refs:
+            pr_map = live.read_prs_batch(pr_refs)
+        if b["fix_issue"]:
+            issue_facts = verdict.read_issue(b["fix_issue"])
+    ev = readiness.evaluate_blocker(
+        b, issue_facts=issue_facts, pr_facts_map=pr_map,
+        active_rules=[r for r in b["rules"] if not r["retired_at"]],
+    )
+    emit(args, ev, render.render_blockers({"blockers": [ev], "untracked_rules": []},
+                                         no_color=args.no_color))
+
+
+def _local_develop_fix_commits(issue_key: str, engine_repo: str | None) -> tuple[str, ...]:
+    if not engine_repo or not Path(engine_repo, ".git").exists():
+        return ()
+    proc = verdict._git(engine_repo, "log", "--format=%H", f"--grep=\\[{issue_key}\\]",
+                        verdict.FIX_REF)
+    return tuple(proc.stdout.split()) if proc.returncode == 0 else ()
+
+
+def cmd_blockers(args, store):
+    blockers = store.blockers(active_only=not args.all)
+    active_rules = store.rules(active_only=True)
+    rules_by_blocker: dict[str, list[dict]] = {}
+    untracked_rules: list[dict] = []
+    for r in active_rules:
+        b = store.blocker_for_rule(r)
+        if b is not None:
+            rules_by_blocker.setdefault(b["id"], []).append(r)
+        else:
+            untracked_rules.append(r)
+
+    # Affected open PRs from cubrid-tcc failures --days N (if requested).
+    failures_by_tc: dict[tuple[str, str], list[dict]] = {}
+    affected_pr_refs: set[tuple[str, int]] = set()
+    if args.affected_days is not None:
+        rep = chronicle.failures(days=args.affected_days, latest_run=True)
+        for item in rep.get("items") or []:
+            pr = item.get("pull_request") or {}
+            pr_num = pr.get("number")
+            if pr_num is None:
+                continue
+            tc = item["testcase"]
+            key = (tc["suite"], tc["path"])
+            failures_by_tc.setdefault(key, []).append(item)
+            affected_pr_refs.add(("CUBRID/cubrid", int(pr_num)))
+
+    pr_refs = {
+        (p["repository"], p["pr_number"])
+        for b in blockers
+        for p in b["prs"]
+        if not p["retired_at"]
+    } | affected_pr_refs
+
+    pr_map: dict[tuple[str, int], live.PrFacts] = {}
+    issues: dict[str, live.IssueFacts] = {}
+    discovered: dict[str, list[live.PrFacts]] = {}
+
+    if not args.offline:
+        if pr_refs:
+            pr_map = live.read_prs_batch(pr_refs)
+        issue_keys = sorted({b["fix_issue"] for b in blockers if b.get("fix_issue")})
+        if issue_keys:
+            with ThreadPoolExecutor(max_workers=min(6, len(issue_keys))) as pool:
+                issues = dict(
+                    zip(issue_keys, pool.map(verdict.read_issue, issue_keys), strict=True)
+                )
+        if not args.no_discover:
+            # Discover PRs only for blockers that have a fix_issue and no active required PRs.
+            tbd = [
+                b for b in blockers
+                if b.get("fix_issue")
+                and not [p for p in b["prs"] if not p["retired_at"] and p["required"]]
+            ]
+            if tbd:
+                tbd_keys = sorted({b["fix_issue"] for b in tbd})
+                with ThreadPoolExecutor(max_workers=min(4, len(tbd_keys))) as pool:
+                    for k, (prs_found, _) in zip(
+                        tbd_keys, pool.map(live.discover_prs_for_issue, tbd_keys), strict=True
+                    ):
+                        discovered[k] = prs_found
+
+    evaluated = []
+    for b in blockers:
+        fix_iss = b.get("fix_issue")
+        iss_facts = issues.get(fix_iss) if fix_iss else None
+        develop_commits = ()
+        if (not args.offline and fix_iss and iss_facts and iss_facts.readable
+                and iss_facts.resolution in verdict.FIXED_RESOLUTIONS
+                and not [p for p in b["prs"] if not p["retired_at"] and p["required"]]):
+            develop_commits = _local_develop_fix_commits(fix_iss, args.engine_repo)
+        ev = readiness.evaluate_blocker(
+            b,
+            target_branch=args.branch,
+            issue_facts=iss_facts,
+            pr_facts_map=pr_map,
+            discovered_prs=discovered.get(fix_iss, ()) if fix_iss else (),
+            fix_on_develop_commits=develop_commits,
+            active_rules=rules_by_blocker.get(b["id"], []),
+        )
+        if args.affected_days is not None:
+            seen_prs: dict[int, dict] = {}
+            for sig in b.get("signatures") or []:
+                for item in failures_by_tc.get((sig["suite"], sig["path"]), []):
+                    pr_info = item.get("pull_request") or {}
+                    num = int(pr_info["number"])
+                    pf = pr_map.get(("CUBRID/cubrid", num))
+                    if pf and pf.readable and pf.state != "OPEN":
+                        continue
+                    seen_prs[num] = {
+                        "pr": num,
+                        "base_ref": pr_info.get("base_ref"),
+                        "testcase_branch": item.get("testcase_branch"),
+                        "engine_sha": item.get("engine_sha"),
+                    }
+            ev["affected_open_prs"] = [seen_prs[n] for n in sorted(seen_prs)]
+        if args.ready_only and ev["readiness"] != "READY":
+            continue
+        evaluated.append(ev)
+
+    report = {
+        "target_branch": args.branch,
+        "blockers": evaluated,
+        "untracked_rules": [] if args.ready_only else [
+            {"id": r["id"], "issue": r["issue"], "expires": r["expires"],
+             "signature_id": r["signature_id"], "job_contains": r["job_contains"]}
+            for r in untracked_rules
+        ],
+    }
+    emit(args, report, render.render_blockers(report, no_color=args.no_color))
+
+
+def cmd_unblock(args, store):
+    rep = chronicle.failures(pr=args.pr, latest_run=True)
+    items = rep.get("items") or []
+    latest_runs = rep.get("latest_runs") or {}
+
+    # Resolve testcase identities and their occurrence tags / blockers / rules.
+    tc_cache: dict[tuple[str, str], Testcase] = {}
+    tags_cache: dict[int, dict] = {}
+    item_matches: list[tuple[dict, Testcase, list[dict], list[dict]]] = []
+    all_blockers: dict[str, dict] = {}
+
+    for item in items:
+        tc_info = item["testcase"]
+        t_key = (tc_info["suite"], tc_info["path"])
+        if t_key not in tc_cache:
+            tc = store.testcase(tc_info["suite"], tc_info["path"],
+                                tc_info["repository"], tc_info.get("variant") or "")
+            tc_cache[t_key] = tc or Testcase(
+                -1, tc_info["repository"], tc_info["suite"], tc_info["path"],
+                tc_info.get("variant") or "")
+        tc = tc_cache[t_key]
+        if tc.id not in tags_cache:
+            tags_cache[tc.id] = store.occurrence_tags(tc) if tc.id != -1 else {}
+        tag = tags_cache[tc.id].get(
+            (item["repository"], item["run_id"], str(item["shard"]), item["ordinal"])
+        )
+        sig_id = tag["signature_id"] if tag else None
+        tc_rules = store.rules(tc=tc) if tc.id != -1 else []
+        if sig_id:
+            tc_rules = [r for r in tc_rules if r["signature_id"] == sig_id] or tc_rules
+        tc_blockers = store.blockers_for_testcase(tc) if tc.id != -1 else []
+        if sig_id:
+            filtered = [
+                b for b in tc_blockers
+                if any(s["id"] == sig_id for s in b.get("signatures") or ())
+            ]
+            tc_blockers = filtered or tc_blockers
+        for b in tc_blockers:
+            all_blockers[b["id"]] = b
+        for r in tc_rules:
+            if b := store.blocker_for_rule(r):
+                all_blockers[b["id"]] = b
+                if b["id"] not in {x["id"] for x in tc_blockers}:
+                    tc_blockers.append(b)
+        item_matches.append((item, tc, tc_blockers, tc_rules))
+
+    pr_refs = {("CUBRID/cubrid", args.pr)} | {
+        (p["repository"], p["pr_number"])
+        for b in all_blockers.values()
+        for p in b["prs"]
+        if not p["retired_at"]
+    }
+    pr_map: dict[tuple[str, int], live.PrFacts] = {}
+    issues: dict[str, live.IssueFacts] = {}
+    if not args.offline:
+        pr_map = live.read_prs_batch(pr_refs)
+        issue_keys = sorted({b["fix_issue"] for b in all_blockers.values() if b.get("fix_issue")})
+        if issue_keys:
+            with ThreadPoolExecutor(max_workers=min(6, len(issue_keys))) as pool:
+                issues = dict(
+                    zip(issue_keys, pool.map(verdict.read_issue, issue_keys), strict=True)
+                )
+
+    target_pr = pr_map.get(("CUBRID/cubrid", args.pr))
+    pr_meta = {
+        "number": args.pr,
+        "state": target_pr.display_state if target_pr else "UNKNOWN",
+        "base_ref": (target_pr.base_ref if target_pr and target_pr.base_ref
+                     else next((i["pull_request"]["base_ref"] for i in items
+                                if i.get("pull_request") and i["pull_request"].get("base_ref")),
+                               None)),
+        "head_ref": (target_pr.head_ref if target_pr and target_pr.head_ref
+                     else next((i["pull_request"]["head_ref"] for i in items
+                                if i.get("pull_request") and i["pull_request"].get("head_ref")),
+                               None)),
+    }
+
+    eval_map: dict[str, dict] = {}
+    for bid, b in all_blockers.items():
+        fix_iss = b.get("fix_issue")
+        iss_facts = issues.get(fix_iss) if fix_iss else None
+        develop_commits = ()
+        if (not args.offline and fix_iss and iss_facts and iss_facts.readable
+                and iss_facts.resolution in verdict.FIXED_RESOLUTIONS
+                and not [p for p in b["prs"] if not p["retired_at"] and p["required"]]):
+            develop_commits = _local_develop_fix_commits(fix_iss, args.engine_repo)
+        eval_map[bid] = readiness.evaluate_blocker(
+            b, target_branch=args.branch, issue_facts=iss_facts,
+            pr_facts_map=pr_map, fix_on_develop_commits=develop_commits,
+        )
+
+    suites_out: dict[str, dict] = {}
+    for item, tc, tc_blockers, tc_rules in item_matches:
+        suite_name = item["suite"]
+        lr = latest_runs.get(suite_name) or {}
+        s_entry = suites_out.setdefault(suite_name, {
+            "run_id": lr.get("run_id") or item["run_id"],
+            "engine_sha": lr.get("engine_sha") or item.get("engine_sha"),
+            "testcase_sha": lr.get("testcase_sha") or item.get("testcase_sha"),
+            "testcase_branch": lr.get("testcase_branch") or item.get("testcase_branch"),
+            "failures": [],
+        })
+        eng_sha = item.get("engine_sha") or s_entry["engine_sha"]
+        tc_sha = item.get("testcase_sha") or s_entry["testcase_sha"]
+        tag = tags_cache[tc.id].get(
+            (item["repository"], item["run_id"], str(item["shard"]), item["ordinal"])
+        )
+        sig_id = tag["signature_id"] if tag else None
+
+        if tc_blockers:
+            b_raw = tc_blockers[0]
+            b_ev = eval_map[b_raw["id"]]
+            fix_presence = None
+            if not args.offline and b_ev["readiness"] == "READY" and eng_sha:
+                bfix, _ = verdict.read_blocker_fix(
+                    b_raw, engine_sha=eng_sha, tc_sha=tc_sha, tc_repo=tc.repository,
+                    engine_repo=args.engine_repo, pr_facts_map=pr_map,
+                )
+                if bfix is not None:
+                    fix_presence = ("present" if bfix.present
+                                    else ("missing" if bfix.present is False else "unknown"))
+            s_entry["failures"].append({
+                "path": tc.path,
+                "shard": item["shard"],
+                "signature": sig_id,
+                "blocker": b_ev,
+                "fix_presence": fix_presence,
+            })
+        elif tc_rules:
+            r0 = tc_rules[0]
+            s_entry["failures"].append({
+                "path": tc.path,
+                "shard": item["shard"],
+                "signature": sig_id,
+                "rule": {"id": r0["id"], "issue": r0["issue"], "expires": r0["expires"],
+                         "verdict": "known" if r0["expires"] or r0["issue"] else "unknown"},
+            })
+        else:
+            s_entry["failures"].append({
+                "path": tc.path,
+                "shard": item["shard"],
+                "signature": sig_id,
+            })
+
+    for suite_name, s_entry in suites_out.items():
+        fs = s_entry["failures"]
+        unclassified = [f for f in fs if not f.get("blocker") and not f.get("rule")]
+        fix_already_in = [f for f in fs if f.get("fix_presence") == "present"]
+        unready = [
+            f for f in fs
+            if (f.get("blocker") and f["blocker"]["readiness"] != "READY") or f.get("rule")
+        ]
+        if unclassified or fix_already_in:
+            s_entry["status"] = "NEEDS ANALYSIS"
+            reasons = []
+            if unclassified:
+                reasons.append(f"{len(unclassified)} unclassified failure(s)")
+            if fix_already_in:
+                reasons.append(f"{len(fix_already_in)} failure(s) already contain fix")
+            s_entry["action"] = "analyze: " + ", ".join(reasons)
+        elif unready:
+            s_entry["status"] = "STILL BLOCKED"
+            wait_items = []
+            for f in unready:
+                if f.get("blocker"):
+                    b = f["blocker"]
+                    wait_items.append(
+                        f"{b['id']} ({b['readiness']}, owner: {b.get('owner') or '-'})"
+                    )
+                else:
+                    wait_items.append(f"rule {f['rule']['id']}")
+            s_entry["action"] = "WAIT on " + ", ".join(dict.fromkeys(wait_items))
+        else:
+            s_entry["status"] = "READY TO UNBLOCK"
+            actions = {
+                f["blocker"]["unblock_action"]
+                for f in fs if f.get("blocker") and f["blocker"].get("unblock_action")
+            }
+            need_engine = bool(actions & {"REBASE_ENGINE", "REBASE_ENGINE_AND_SYNC_TC"})
+            need_tc = bool(actions & {"RERUN_OR_SYNC_TC", "REBASE_ENGINE_AND_SYNC_TC"})
+            tc_br = s_entry.get("testcase_branch") or ""
+            steps = []
+            if need_engine:
+                steps.append(f"rebase/merge {args.branch} into engine PR #{args.pr}")
+            if need_tc:
+                if tc_br.startswith("tc/pr-"):
+                    steps.append(f"sync {tc_br} with {args.branch}")
+                else:
+                    steps.append(f"rerun {suite_name} immediately (TC uses {args.branch})")
+            if not steps:
+                steps.append(f"rerun {suite_name}")
+            s_entry["action"] = "; ".join(steps)
+
+    report = {"pull_request": pr_meta, "target_branch": args.branch, "suites": suites_out}
+    emit(args, report, render.render_unblock(report, no_color=args.no_color))
+
+
 def cmd_rule_add(args, store):
     proposal = {k: getattr(args, k) for k in
-                ("id", "signature", "job_contains", "issue", "expires", "not_covered")}
+                ("id", "signature", "job_contains", "issue", "expires", "blocker", "not_covered")}
     if not args.yes:
         emit(args, {"result": "dry_run", "rule": proposal},
              "dry run, nothing written. Show this rule to the user, then rerun with"
@@ -353,15 +826,15 @@ def cmd_rule_add(args, store):
         raise RegistryError("--yes needs --approved-by <name of the person who approved>")
     r = store.add_rule(args.id, sig_id=args.signature, job_contains=args.job_contains,
                        issue=args.issue, expires=args.expires, not_covered=args.not_covered,
-                       approved_by=args.approved_by)
+                       approved_by=args.approved_by, blocker_id=args.blocker)
     emit(args, {"result": r}, f"rule {args.id}: {r}")
 
 
 EXPIRY_WARN_DAYS = 14
 
 
-def audit_rule(rule, issue, today):
-    """Add live issue state, days to expiry, and flags to one rule row."""
+def audit_rule(rule, issue, today, *, blocker_eval: dict | None = None):
+    """Add live issue state, days to expiry, blocker readiness, and flags to one rule row."""
     out = {"id": rule["id"], "kind": "job" if rule["job_contains"] is not None else "signature",
            "signature": rule["signature_id"], "job_contains": rule["job_contains"],
            "issue": rule["issue"], "expires": rule["expires"], "approved_by": rule["approved_by"],
@@ -369,6 +842,8 @@ def audit_rule(rule, issue, today):
     if issue is not None:
         out["issue_status"] = issue.status if issue.readable else None
         out["issue_resolution"] = issue.resolution if issue.readable else None
+        if issue.readable and issue.assignee:
+            out["issue_assignee"] = issue.assignee
         if not issue.readable:
             out["issue_error"] = issue.error
     flags = []
@@ -381,6 +856,21 @@ def audit_rule(rule, issue, today):
             flags.append(f"expires within {EXPIRY_WARN_DAYS} days")
     if issue is not None and issue.readable and issue.resolution in verdict.FIXED_RESOLUTIONS:
         flags.append(f"issue resolved {issue.resolution}: retire the rule or expect fix_* verdicts")
+    if blocker_eval is not None:
+        out["blocker_id"] = blocker_eval["id"]
+        out["readiness"] = blocker_eval["readiness"]
+        out["unblock_action"] = blocker_eval["unblock_action"]
+        out["owner"] = blocker_eval["owner"]
+        out["culprit"] = blocker_eval["culprit"]
+        out["fix_prs"] = blocker_eval["fix_prs"]
+        if blocker_eval["readiness"] == "READY":
+            flags.append(
+                f"blocker {blocker_eval['id']} READY ({blocker_eval['unblock_action']}):"
+                " consider retiring rule"
+            )
+        for bf in blocker_eval.get("flags") or []:
+            if bf not in flags:
+                flags.append(bf)
     out["flags"] = flags
     return out
 
@@ -389,22 +879,57 @@ def cmd_rules(args, store):
     rows = store.rules(active_only=not args.all)
     today = date.today()
     issues = {}
+    blocker_evals: dict[str, dict] = {}
     if args.audit:
-        for key in sorted({r["issue"] for r in rows if r["issue"]}):
+        blockers_by_rule = {r["id"]: store.blocker_for_rule(r) for r in rows}
+        all_blockers = [b for b in blockers_by_rule.values() if b is not None]
+        issue_keys = sorted({
+            *{r["issue"] for r in rows if r["issue"]},
+            *{b["fix_issue"] for b in all_blockers if b.get("fix_issue")},
+        })
+        for key in issue_keys:
             issues[key] = verdict.read_issue(key)
-    data = [audit_rule(r, issues.get(r["issue"]), today) for r in rows]
+        pr_refs = {
+            (p["repository"], p["pr_number"])
+            for b in all_blockers
+            for p in b["prs"]
+            if not p["retired_at"]
+        }
+        pr_map = live.read_prs_batch(pr_refs) if pr_refs else {}
+        for r in rows:
+            b = blockers_by_rule.get(r["id"])
+            if b is not None:
+                fix_iss = b.get("fix_issue")
+                blocker_evals[r["id"]] = readiness.evaluate_blocker(
+                    b,
+                    issue_facts=issues.get(fix_iss) if fix_iss else None,
+                    pr_facts_map=pr_map,
+                )
+    data = [
+        audit_rule(r, issues.get(r["issue"]), today, blocker_eval=blocker_evals.get(r["id"]))
+        for r in rows
+    ]
     lines = []
     for d in data:
         scope = f"job contains {d['job_contains']!r}" if d["kind"] == "job" else \
             f"signature {d['signature']}"
-        lines.append(f"{d['id']} [{d['kind']}] {scope}" + (" (retired)" if d["retired"] else ""))
+        b_suffix = f" [blocker {d['blocker_id']}]" if d.get("blocker_id") else ""
+        lines.append(f"{d['id']} [{d['kind']}] {scope}{b_suffix}"
+                     + (" (retired)" if d["retired"] else ""))
         lines.append(f"  issue {d['issue'] or '-'}, expires {d['expires'] or '-'},"
                      f" approved by {d['approved_by'] or '-'}, created {d['created']}")
         if args.audit:
             if "issue_status" in d:
                 state = d["issue_status"] or "unreadable"
+                assignee = f", assignee {d['issue_assignee']}" if d.get("issue_assignee") else ""
                 lines.append(f"  {d['issue']}: {state} / {d['issue_resolution'] or 'unresolved'}"
+                             f"{assignee}"
                              + (f" ({d['issue_error']})" if "issue_error" in d else ""))
+            if "readiness" in d:
+                lines.append(f"  blocker {d['blocker_id']}: {d['readiness']}"
+                             f" (owner {d.get('owner') or '-'})"
+                             + (f", action {d['unblock_action']}"
+                                if d.get("unblock_action") else ""))
             if "days_to_expiry" in d:
                 lines.append(f"  expires in {d['days_to_expiry']} days")
             lines += [f"  FLAG {f}" for f in d["flags"]]
@@ -442,7 +967,9 @@ def cmd_backup(args, store):
 
 def cmd_export(args, store):
     out = ["# cubrid-tcr export. Generated; edit the database through cubrid-tcr instead.\n"]
-    for table in ("testcase", "signature", "issue_link", "rule", "note", "occurrence_signature"):
+    tables = ("testcase", "signature", "issue_link", "blocker", "blocker_pr",
+              "blocker_signature", "rule", "note", "occurrence_signature")
+    for table in tables:
         for row in store.db.execute(f"SELECT * FROM {table} ORDER BY rowid"):
             out.append(f"[[{table}]]")
             for k in row.keys():
@@ -465,6 +992,8 @@ def parser() -> argparse.ArgumentParser:
                             help="who writes, recorded in the event log (env TCR_ACTOR)")
         target.add_argument("--json", action="store_true", default=default(False),
                             help="print JSON")
+        target.add_argument("--no-color", action="store_true", default=default(False),
+                            help="disable colorized terminal output")
 
     global_options(p, lambda value: value)
     # The same options after the command. SUPPRESS keeps a value given before the command.
@@ -486,6 +1015,8 @@ def parser() -> argparse.ArgumentParser:
     g = s.add_mutually_exclusive_group()
     g.add_argument("--days", type=int, help="list only failures of the last N days")
     g.add_argument("--all", action="store_true", help="list every indexed failure")
+    s.add_argument("--live", action="store_true",
+                   help="fetch live JIRA and PR status for linked blockers")
     s.set_defaults(func=cmd_show)
 
     s = add(sub, "check", help="decide whether failures are known issues")
@@ -497,6 +1028,7 @@ def parser() -> argparse.ArgumentParser:
                         " (reads summary.json and failures/*; engine SHA comes from the shard)")
     s.add_argument("--suite", choices=CHECK_SUITES)
     s.add_argument("--engine", help="tested Engine commit (--case and --job)")
+    s.add_argument("--tc-sha", help="tested testcase repository commit SHA (--case)")
     s.add_argument("--record", action="store_true",
                    help="with --ci-attempt, attach a signature to each occurrence that matches"
                         " exactly one; without it nothing is written")
@@ -541,6 +1073,94 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--ref", action="append", help="a PR, run, issue, or document reference")
     s.set_defaults(func=cmd_note)
 
+    # First-class blocker management
+    s = add(sub, "blocker", help="track culprit, fix issue, fix PRs, and owner for a blocker")
+    bs = s.add_subparsers(dest="action", required=True)
+
+    def add_culprit_opts(sp, *, for_update=False):
+        sp.add_argument("--title", help="short blocker summary")
+        sp.add_argument("--culprit",
+                        help="culprit PR ref (engine#8537, tc#4474) or commit SHA (auto-hydrated)")
+        sp.add_argument("--culprit-repo", help="culprit repository")
+        sp.add_argument("--culprit-commit", help="culprit commit SHA")
+        sp.add_argument("--culprit-pr", type=int, help="culprit PR number")
+        sp.add_argument("--culprit-issue", help="culprit CBRD issue key")
+        sp.add_argument("--culprit-author", help="culprit author login or name")
+        sp.add_argument("--culprit-confidence",
+                        choices=CONFIDENCES,
+                        default=None if for_update else "confirmed")
+        sp.add_argument("--culprit-note", help="bisect or root-cause note")
+        sp.add_argument("--fix-issue", help="CBRD issue tracking the fix")
+        sp.add_argument("--owner", help="local fallback owner when no JIRA assignee / PR author")
+        sp.add_argument("--engine-repo", default=os.environ.get("TCR_ENGINE_REPO"),
+                        help="local engine clone for culprit SHA inspection")
+        sp.add_argument("--offline", action="store_true", help="skip GitHub auto-hydration")
+
+    a = add(bs, "add")
+    a.add_argument("id", help="blocker id (e.g. CBRD-28395 or tc-4474)")
+    add_culprit_opts(a)
+    a.add_argument("--pr", action="append", help="required fix PR ref (repeatable)")
+    a.add_argument("--pr-optional", action="append", help="non-blocking fix/TC PR ref")
+    a.add_argument("--target-branch", default="develop", help="target branch (default: develop)")
+    a.add_argument("--signature", action="append", help="signature ID to attach (repeatable)")
+    a.add_argument("--rule", action="append", help="existing rule ID to link (repeatable)")
+    a.set_defaults(func=cmd_blocker_add)
+
+    a = add(bs, "update")
+    a.add_argument("id")
+    add_culprit_opts(a, for_update=True)
+    a.set_defaults(func=cmd_blocker_update)
+
+    a = add(bs, "show")
+    a.add_argument("id")
+    a.add_argument("--live", action="store_true", help="query live GitHub PR and JIRA state")
+    a.set_defaults(func=cmd_blocker_show)
+
+    a = add(bs, "retire")
+    a.add_argument("id")
+    a.add_argument("--reason", required=True)
+    a.set_defaults(func=cmd_blocker_retire)
+
+    a = add(bs, "link", help="link signatures or existing rules to a blocker")
+    a.add_argument("id")
+    a.add_argument("--signature", action="append")
+    a.add_argument("--rule", action="append")
+    a.set_defaults(func=cmd_blocker_link)
+
+    bp = add(bs, "pr", help="add or retire fix PRs on a blocker")
+    bps = bp.add_subparsers(dest="pr_action", required=True)
+    a = add(bps, "add")
+    a.add_argument("id")
+    a.add_argument("pr_ref", help="PR ref: engine#N, tc#N, tc-private#N, or URL")
+    a.add_argument("--target-branch", default="develop")
+    a.add_argument("--optional", action="store_true",
+                   help="mark PR as optional (does not gate READY)")
+    a.set_defaults(func=cmd_blocker_pr_add)
+    a = add(bps, "retire")
+    a.add_argument("id")
+    a.add_argument("pr_ref")
+    a.add_argument("--reason", required=True)
+    a.set_defaults(func=cmd_blocker_pr_retire)
+
+    s = add(sub, "blockers", help="list blockers with live fix PR merge & owner readiness")
+    s.add_argument("--branch", default="develop", help="target branch (default: develop)")
+    s.add_argument("--ready-only", action="store_true", help="show only READY blockers")
+    s.add_argument("--all", action="store_true", help="include retired blockers")
+    s.add_argument("--no-discover", action="store_true",
+                   help="skip cubrid-xref discovery for PR-TBD blockers")
+    s.add_argument("--affected-days", type=int,
+                   help="also list open PRs still failing in last N days via cubrid-tcc")
+    s.add_argument("--engine-repo", default=os.environ.get("TCR_ENGINE_REPO"))
+    s.add_argument("--offline", action="store_true", help="skip GitHub, JIRA, and cubrid-xref")
+    s.set_defaults(func=cmd_blockers)
+
+    s = add(sub, "unblock", help="check whether a PR's latest failures are unblocked on develop")
+    s.add_argument("--pr", type=int, required=True, help="pull request number to check")
+    s.add_argument("--branch", default="develop", help="target branch (default: develop)")
+    s.add_argument("--engine-repo", default=os.environ.get("TCR_ENGINE_REPO"))
+    s.add_argument("--offline", action="store_true", help="skip GitHub and JIRA queries")
+    s.set_defaults(func=cmd_unblock)
+
     s = add(sub, "rule", help="add or retire a known-issue rule")
     ss = s.add_subparsers(dest="action", required=True)
     a = add(ss, "add", help="dry run unless --yes and --approved-by")
@@ -549,7 +1169,8 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--signature")
     g.add_argument("--job-contains")
     a.add_argument("--issue")
-    a.add_argument("--expires", help="YYYY-MM-DD, required without --issue")
+    a.add_argument("--expires", help="YYYY-MM-DD, required without --issue or --blocker")
+    a.add_argument("--blocker", help="blocker ID backing this rule")
     a.add_argument("--not-covered", required=True)
     a.add_argument("--approved-by")
     a.add_argument("--yes", action="store_true")
@@ -559,9 +1180,9 @@ def parser() -> argparse.ArgumentParser:
     a.add_argument("--reason", required=True)
     a.set_defaults(func=cmd_rule_retire)
 
-    s = add(sub, "rules", help="list known-issue rules, optionally with live issue state")
+    s = add(sub, "rules", help="list known-issue rules, optionally with live issue/blocker state")
     s.add_argument("--audit", action="store_true",
-                   help="read each issue from Jira and flag Fixed, expiring, and expired rules")
+                   help="read each issue/blocker live and flag Fixed, merged PR, or expiring rules")
     s.add_argument("--all", action="store_true", help="include retired rules")
     s.set_defaults(func=cmd_rules)
 
@@ -585,7 +1206,7 @@ def main(argv=None):
     try:
         store = Store(args.database or default_path(), args.actor)
         args.func(args, store)
-    except (RegistryError, OSError) as e:
+    except (RegistryError, OSError, chronicle.ChronicleError) as e:
         print(json.dumps({"error": str(e)}) if args.json else f"error: {e}", file=sys.stderr)
         sys.exit(2)
     finally:

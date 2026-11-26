@@ -3,7 +3,7 @@
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 
-from . import chronicle
+from . import chronicle, live, readiness, verdict
 
 DETAIL_LIMIT = 50
 SHORT_DAYS = 60
@@ -41,7 +41,34 @@ def passes_text(passes: int | None) -> str:
     return "passes not recorded (failure-list evidence)" if passes is None else f"{passes} passes"
 
 
-def build(store, tc, *, days=None, show_all=False, now=None, fetched=None) -> dict:
+def _hydrate_blockers(blockers: list[dict], *, live_lookup: bool) -> list[dict]:
+    if not blockers:
+        return []
+    if not live_lookup:
+        return [readiness.evaluate_blocker(b) for b in blockers]
+    pr_refs = [
+        (p["repository"], p["pr_number"])
+        for b in blockers
+        for p in b.get("prs") or ()
+        if not p.get("retired_at")
+    ]
+    pr_map = live.read_prs_batch(pr_refs) if pr_refs else {}
+    issues = {
+        k: verdict.read_issue(k)
+        for k in sorted({b["fix_issue"] for b in blockers if b.get("fix_issue")})
+    }
+    return [
+        readiness.evaluate_blocker(
+            b,
+            issue_facts=issues.get(b["fix_issue"]) if b.get("fix_issue") else None,
+            pr_facts_map=pr_map,
+        )
+        for b in blockers
+    ]
+
+
+def build(store, tc, *, days=None, show_all=False, now=None, fetched=None,
+          live_lookup: bool = False) -> dict:
     """`fetched` is a (history, status) pair or a ChronicleError already read for this testcase."""
     now = now or datetime.now(UTC)
     tags = store.occurrence_tags(tc)
@@ -79,12 +106,14 @@ def build(store, tc, *, days=None, show_all=False, now=None, fetched=None) -> di
         older=summarize(older) if older else None,
         all_failures=summarize(failures),
     )
+    blockers = _hydrate_blockers(store.blockers_for_testcase(tc), live_lookup=live_lookup)
     return {
         "testcase": {"repository": tc.repository, "suite": tc.suite, "path": tc.path,
                      "variant": tc.variant},
         "history": history,
         "links": store.links(tc),
         "signatures": store.signatures(tc),
+        "blockers": blockers,
         "rules": store.rules(tc=tc),
         "notes": store.notes(tc),
     }
@@ -127,6 +156,24 @@ def render(view: dict) -> str:
     out.append("signatures:" if view["signatures"] else "signatures: none")
     for s in view["signatures"]:
         out.append(f"  {s['id']}: {s['label']} [{' > '.join(s['frames'])}]")
+    blockers = view.get("blockers") or []
+    out.append("blockers:" if blockers else "blockers: none")
+    for b in blockers:
+        c = b.get("culprit") or {}
+        c_parts = [x for x in (
+            f"{c['repository']}#{c['pr']}" if c.get("pr") else None,
+            c["commit"][:10] if c.get("commit") else None,
+            c.get("issue"),
+            c.get("author"),
+        ) if x]
+        prs = ", ".join(
+            f"{p['repository']}#{p['pr_number']}[{p['state']}]" for p in b.get("fix_prs") or []
+        ) or "none"
+        owner = f"{b['owner']} ({b['owner_source']})" if b.get("owner") else "-"
+        out.append(
+            f"  {b['id']} [{b['readiness']}] fix={b.get('fix_issue') or '-'} owner={owner}"
+            f" culprit={' '.join(c_parts) or '-'} prs={prs}"
+        )
     out.append("rules:" if view["rules"] else "rules: none")
     for r in view["rules"]:
         out.append(f"  {r['id']} issue {r['issue'] or '-'} expires {r['expires'] or '-'}"

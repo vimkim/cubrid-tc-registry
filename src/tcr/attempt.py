@@ -38,6 +38,7 @@ def load(directory: str) -> dict:
     if suite not in CHRONICLE_SUITE:
         raise RegistryError(f"unknown CI suite {suite!r} in {root / 'summary.json'}")
     shas = {s["index"]: s["build"]["sha"] for s in summary["shards"]}
+    tc_info = {s["index"]: (s.get("testcases") or {}) for s in summary["shards"]}
     failures = []
     for entry in summary["failures"]:
         folder = root / "failures" / entry["stable_id"]
@@ -45,6 +46,7 @@ def load(directory: str) -> dict:
         if meta["shard"] not in shas:
             raise RegistryError(f"{folder}: shard {meta['shard']} is not in summary.json shards")
         message = root / meta["message_path"]
+        tc_meta = tc_info.get(meta["shard"]) or {}
         failures.append({
             "suite": suite,
             "path": meta["name"],
@@ -52,6 +54,8 @@ def load(directory: str) -> dict:
             "attempt": summary["attempt"],
             "shard": meta["shard"],
             "engine_sha": shas[meta["shard"]],
+            "testcase_sha": tc_meta.get("sha"),
+            "testcase_branch": tc_meta.get("branch"),
             "result": meta["result"],
             "message": message.read_text(errors="replace") if message.is_file() else "",
         })

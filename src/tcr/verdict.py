@@ -1,18 +1,17 @@
 """Decide whether a failure is a known issue.
 
-`decide` is pure. `IssueFacts` and `FixFacts` come from the Jira and Git readers below, which
-are the only parts that touch the network or a repository.
+`decide` is pure. `IssueFacts` and `FixFacts` come from the Jira, GitHub, and Git readers,
+which are the only parts that touch the network or a repository.
 """
 
 import functools
 import json
 import subprocess
-import urllib.error
-import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import date
 
-from . import stack
+from . import live, stack
+from .live import IssueFacts
 
 JIRA_URL = "https://jira.cubrid.org/rest/api/2/issue/{key}?fields=status,resolution"
 FIX_REF = "origin/develop"
@@ -23,16 +22,8 @@ FIXED_RESOLUTIONS = frozenset({"Fixed", "Done"})
 
 
 @dataclass(frozen=True)
-class IssueFacts:
-    readable: bool
-    status: str | None = None
-    resolution: str | None = None
-    error: str | None = None
-
-
-@dataclass(frozen=True)
 class FixFacts:
-    """Whether the tested Engine commit contains the fix. `present` is None when unknown."""
+    """Whether the tested commit(s) contain the fix. `present` is None when unknown."""
 
     present: bool | None
     basis: str
@@ -47,6 +38,7 @@ class Hit:
     reason: str
     not_covered: str
     fix_commits: tuple[str, ...] = ()
+    blocker_id: str | None = None
 
     def as_dict(self):
         d = asdict(self)
@@ -69,15 +61,19 @@ def scope_matches(rule, *, job: str | None, stack_text: str | None, signature) -
 
 
 def decide(rule, scope: str, today: date, issue: IssueFacts | None,
-           fix: FixFacts | None) -> Hit | None:
+           fix: FixFacts | None, *, blocker_id: str | None = None,
+           blocker_fix: FixFacts | None = None,
+           open_blocker_reason: str | None = None) -> Hit | None:
     """Map one rule and its gathered facts to a verdict. None means the rule does not apply."""
+    effective_blocker = blocker_id or rule.get("blocker_id")
 
     def hit(verdict, reason, commits=()):
         if verdict == "known" and rule["job_contains"] is not None:
             verdict = "known_job"
             reason = ("the job is known noisy and each failure's symptom still needs analysis;"
                       f" {reason}")
-        return Hit(rule["id"], rule["issue"], verdict, reason, rule["not_covered"], tuple(commits))
+        return Hit(rule["id"], rule["issue"], verdict, reason, rule["not_covered"],
+                   tuple(commits), effective_blocker)
 
     if scope == "miss":
         return None
@@ -86,7 +82,24 @@ def decide(rule, scope: str, today: date, issue: IssueFacts | None,
     if scope == "no_stack":
         return hit("unknown",
                    "no stack or failure text was given, so the signature could not be compared")
+    if blocker_fix is not None:
+        # Merged required blocker PRs decide fix_present / fix_missing / unknown directly,
+        # unless JIRA explicitly resolved the issue with a non-Fixed resolution (e.g. Won't Fix).
+        if issue and issue.readable and issue.resolution is not None and (
+                issue.resolution not in FIXED_RESOLUTIONS):
+            return hit("unknown",
+                       f"{rule['issue']} is resolved as {issue.resolution}, not Fixed or Done")
+        if blocker_fix.present is None:
+            return hit("unknown", f"fix presence is unknown: {blocker_fix.basis}",
+                       blocker_fix.fix_commits)
+        if blocker_fix.present:
+            return hit("fix_present", blocker_fix.basis, blocker_fix.fix_commits)
+        return hit("fix_missing", blocker_fix.basis, blocker_fix.fix_commits)
     if rule["issue"] is None:
+        if open_blocker_reason:
+            return hit("known", open_blocker_reason)
+        if effective_blocker:
+            return hit("known", f"blocker {effective_blocker} has no merged fix PR yet")
         return hit("known", "the rule has no tracking issue and has not expired")
     if issue is None or not issue.readable:
         return hit("unknown", f"the issue state is unknown: {issue.error if issue else 'offline'}")
@@ -103,17 +116,7 @@ def decide(rule, scope: str, today: date, issue: IssueFacts | None,
 
 
 def read_issue(key: str, timeout: float = 30) -> IssueFacts:
-    try:
-        with urllib.request.urlopen(JIRA_URL.format(key=key), timeout=timeout) as resp:
-            fields = json.load(resp)["fields"]
-    except (urllib.error.URLError, TimeoutError, KeyError, ValueError) as e:
-        return IssueFacts(readable=False, error=str(e))
-    resolution = fields.get("resolution")
-    return IssueFacts(
-        readable=True,
-        status=(fields.get("status") or {}).get("name"),
-        resolution=resolution.get("name") if resolution else None,
-    )
+    return live.read_issue_live(key, timeout=timeout)
 
 
 def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
@@ -176,3 +179,80 @@ def read_fix(key: str, engine_sha: str, repo: str) -> FixFacts:
     if not commits:
         return FixFacts(None, f"no commit on {FIX_REF} names {key}")
     return FixFacts(False, f"{engine_sha} lacks fix commits from {FIX_REF}", commits)
+
+
+def read_blocker_fix(
+    blocker: dict,
+    *,
+    engine_sha: str,
+    tc_sha: str | None,
+    tc_repo: str | None,
+    engine_repo: str | None,
+    pr_facts_map: dict[tuple[str, int], live.PrFacts],
+) -> tuple[FixFacts | None, str | None]:
+    """Evaluate a blocker's pinned required PRs against the tested engine/TC commits.
+
+    Returns (blocker_fix, open_blocker_reason).
+    `blocker_fix` is non-None when all required PRs are merged on their target branch.
+    """
+    required_prs = [
+        p for p in blocker.get("prs") or () if not p.get("retired_at") and p.get("required", 1)
+    ]
+    if not required_prs:
+        return None, None
+    facts = [pr_facts_map.get((p["repository"], p["pr_number"])) for p in required_prs]
+    if any(pf is None or not pf.readable for pf in facts):
+        return None, None
+    unmerged = [
+        (p, pf) for p, pf in zip(required_prs, facts, strict=True)
+        if not (pf.merged and pf.base_ref == (p.get("target_branch") or "develop"))
+    ]
+    if unmerged:
+        p0, pf0 = unmerged[0]
+        return None, (
+            f"blocker {blocker['id']} fix PR {p0['repository']}#{p0['pr_number']}"
+            f" is {pf0.display_state} (target {p0.get('target_branch') or 'develop'})"
+        )
+
+    commits: list[str] = []
+    missing_reasons: list[str] = []
+    unknown_reasons: list[str] = []
+    present_reasons: list[str] = []
+    for p, pf in zip(required_prs, facts, strict=True):
+        assert pf is not None
+        sha = pf.merge_commit_sha
+        if not sha:
+            unknown_reasons.append(
+                f"{p['repository']}#{p['pr_number']} merged without merge_commit_sha")
+            continue
+        commits.append(sha)
+        repo = p["repository"]
+        if repo == "CUBRID/cubrid":
+            present, basis = live.check_commit_in_target(repo, sha, engine_sha, engine_repo)
+        else:
+            if tc_repo and repo != tc_repo:
+                continue
+            if not tc_sha:
+                unknown_reasons.append(
+                    f"TC fix {repo}#{p['pr_number']} merged on {pf.base_ref};"
+                    " pass --tc-sha to verify fix presence"
+                )
+                continue
+            present, basis = live.check_commit_in_target(repo, sha, tc_sha)
+        if present is False:
+            missing_reasons.append(
+                f"{repo}#{p['pr_number']} ({sha[:12]}) merged on {pf.base_ref}: {basis}"
+            )
+        elif present is None:
+            unknown_reasons.append(basis)
+        else:
+            present_reasons.append(f"{repo}#{p['pr_number']} ({sha[:12]}) is in tested commit")
+
+    if missing_reasons:
+        return FixFacts(False, "; ".join(missing_reasons), tuple(commits)), None
+    if unknown_reasons:
+        return FixFacts(None, "; ".join(unknown_reasons), tuple(commits)), None
+    if not present_reasons:
+        return FixFacts(None, f"blocker {blocker['id']} has no applicable repo check",
+                        tuple(commits)), None
+    return FixFacts(True, "; ".join(present_reasons), tuple(commits)), None

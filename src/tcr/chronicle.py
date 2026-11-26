@@ -17,9 +17,10 @@ class AmbiguousTestcase(ChronicleError):
     """cubrid-tcc exit 3: the case matches several testcases."""
 
 
-# The cubrid-tcc 0.3.0 contract: schema_version per command, and the keys we read without a default.
+# The cubrid-tcc 0.3.0+ contract: schema_version per command, and keys we read without a default.
 SCHEMA = {"find": (2, ("candidates",)), "history": (2, ("occurrences",)),
-          "explain": (2, ()), "status": (1, ("status", "freshness")), "coverage": (1, ())}
+          "explain": (2, ()), "status": (1, ("status", "freshness")), "coverage": (1, ()),
+          "failures": (1, ("items",))}
 TIMEOUT = 300  # seconds; a cold history or status read takes about 40 s
 SHOWN_CANDIDATES = 5
 
@@ -100,10 +101,28 @@ def occurrence(o: dict) -> dict:
         "outcome": o["outcome"],
         "completed_at": o.get("completed_at"),
         "engine_sha": o.get("engine_sha"),
+        "testcase_sha": o.get("testcase_sha"),
+        "testcase_branch": o.get("testcase_branch"),
         "build_mode": o.get("build_mode"),
         "pr": pr.get("number"),
         "branch": pr.get("base_ref") or o.get("engine_branch") or "unknown",
     }
+
+
+def failures(*, pr: int | None = None, run_id: int | None = None, days: int | None = None,
+             latest_run: bool = False, suite: str | None = None) -> dict:
+    args = ["failures"]
+    if pr is not None:
+        args += ["--pr", str(pr)]
+    if run_id is not None:
+        args += ["--run", str(run_id)]
+    if days is not None:
+        args += ["--days", str(days)]
+    if latest_run:
+        args.append("--latest-run")
+    if suite:
+        args += ["--suite", suite]
+    return _run(*args)
 
 
 def sync_hint(status: dict) -> str | None:

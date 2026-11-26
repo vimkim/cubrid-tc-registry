@@ -27,6 +27,30 @@ WRITE_SUITES = tuple(sorted(SUITE_ALIASES))
 CHECK_SUITES = tuple(sorted((*SUITE_ALIASES, *CCI_SUITES)))
 RELATIONS = ("origin", "tracks", "suspected", "fixed_by")
 ISSUE_KEY = re.compile(r"^CBRD-\d+$")
+KNOWN_REPOS = (
+    "CUBRID/cubrid",
+    "CUBRID/cubrid-testcases",
+    "CUBRID/cubrid-testcases-private-ex",
+)
+REPO_ALIASES = {
+    "engine": "CUBRID/cubrid",
+    "cubrid": "CUBRID/cubrid",
+    "cubrid/cubrid": "CUBRID/cubrid",
+    "tc": "CUBRID/cubrid-testcases",
+    "tc-public": "CUBRID/cubrid-testcases",
+    "cubrid-testcases": "CUBRID/cubrid-testcases",
+    "cubrid/cubrid-testcases": "CUBRID/cubrid-testcases",
+    "tc-private": "CUBRID/cubrid-testcases-private-ex",
+    "cubrid-testcases-private-ex": "CUBRID/cubrid-testcases-private-ex",
+    "cubrid/cubrid-testcases-private-ex": "CUBRID/cubrid-testcases-private-ex",
+}
+CONFIDENCES = ("confirmed", "suspected")
+BLOCKER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
+_PR_URL = re.compile(
+    r"^https?://github\.com/(CUBRID/[^/]+)/pull/(\d+)(?:[/?#].*)?$", re.IGNORECASE
+)
+SCHEMA_VERSION = 2
 
 
 def is_cci_suite(suite: str | None) -> bool:
@@ -43,6 +67,54 @@ def normalize_suite(suite: str | None) -> str | None:
         return "sql"
     raise RegistryError(f"suite must be one of {', '.join(CHECK_SUITES)}: {suite!r}")
 
+
+def parse_pr_ref(ref: str, default_repo: str = "CUBRID/cubrid") -> tuple[str, int]:
+    """Parse PR shorthand or URL into (repository, pr_number)."""
+    raw = ref.strip()
+    if m := _PR_URL.match(raw):
+        owner_repo = m.group(1)
+        repo = REPO_ALIASES.get(owner_repo.lower())
+        if not repo:
+            raise RegistryError(f"unsupported PR repository: {owner_repo!r}")
+        num = int(m.group(2))
+        if num < 1:
+            raise RegistryError(f"PR number must be positive: {ref!r}")
+        return repo, num
+    if "#" in raw:
+        prefix, num_s = raw.split("#", 1)
+        repo = default_repo if not prefix else REPO_ALIASES.get(prefix.strip().lower())
+        if not repo:
+            raise RegistryError(
+                f"unknown repository alias {prefix!r}; use engine#, tc#, tc-private#, or full repo"
+            )
+    else:
+        repo, num_s = default_repo, raw
+    if not num_s.isdigit() or int(num_s) < 1:
+        raise RegistryError(f"PR reference must end with a positive number: {ref!r}")
+    return repo, int(num_s)
+
+
+def check_repo(repo: str) -> str:
+    resolved = REPO_ALIASES.get(repo.strip().lower(), repo.strip())
+    if resolved not in KNOWN_REPOS:
+        raise RegistryError(f"repository must be one of {', '.join(KNOWN_REPOS)}: {repo!r}")
+    return resolved
+
+
+def check_commit_sha(sha: str) -> str:
+    s = sha.strip().lower()
+    if not COMMIT_SHA.match(s):
+        raise RegistryError(f"commit SHA must be 7-40 hex chars: {sha!r}")
+    return s
+
+
+def check_blocker_id(bid: str) -> str:
+    s = bid.strip()
+    if not BLOCKER_ID.match(s):
+        raise RegistryError(f"blocker id must match {BLOCKER_ID.pattern}: {bid!r}")
+    return s
+
+
 SIGNATURE_TABLE = """CREATE TABLE signature (
     id TEXT PRIMARY KEY,
     testcase_id INTEGER NOT NULL REFERENCES testcase(id),
@@ -51,6 +123,31 @@ SIGNATURE_TABLE = """CREATE TABLE signature (
     required_text TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     CHECK (json_array_length(frames) > 0 OR json_array_length(required_text) > 0)
+);"""
+
+ISSUE_LINK_TABLE = """CREATE TABLE issue_link (
+    testcase_id INTEGER NOT NULL REFERENCES testcase(id),
+    issue TEXT NOT NULL,
+    relation TEXT NOT NULL CHECK (relation IN ('origin', 'tracks', 'suspected', 'fixed_by')),
+    signature_id TEXT REFERENCES signature(id),
+    actor TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);"""
+
+RULE_TABLE = """CREATE TABLE rule (
+    id TEXT PRIMARY KEY,
+    signature_id TEXT REFERENCES signature(id),
+    job_contains TEXT,
+    issue TEXT,
+    expires TEXT,
+    blocker_id TEXT REFERENCES blocker(id),
+    not_covered TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    retired_at TEXT,
+    retired_reason TEXT,
+    CHECK ((signature_id IS NULL) <> (job_contains IS NULL)),
+    CHECK (issue IS NOT NULL OR expires IS NOT NULL OR blocker_id IS NOT NULL)
 );"""
 
 SCHEMA = f"""
@@ -76,15 +173,9 @@ CREATE TABLE IF NOT EXISTS occurrence_signature (
     created_at TEXT NOT NULL,
     PRIMARY KEY (repository, run_id, attempt, shard, testcase_id, ordinal)
 );
-CREATE TABLE IF NOT EXISTS issue_link (
-    testcase_id INTEGER NOT NULL REFERENCES testcase(id),
-    issue TEXT NOT NULL,
-    relation TEXT NOT NULL CHECK (relation IN ('origin', 'tracks', 'suspected', 'fixed_by')),
-    signature_id TEXT REFERENCES signature(id),
-    actor TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY (testcase_id, issue, relation)
-);
+{ISSUE_LINK_TABLE.replace('CREATE TABLE', 'CREATE TABLE IF NOT EXISTS', 1)}
+CREATE UNIQUE INDEX IF NOT EXISTS issue_link_uniq
+    ON issue_link(testcase_id, issue, relation, COALESCE(signature_id, ''));
 CREATE TABLE IF NOT EXISTS note (
     id INTEGER PRIMARY KEY,
     testcase_id INTEGER NOT NULL REFERENCES testcase(id),
@@ -95,20 +186,46 @@ CREATE TABLE IF NOT EXISTS note (
     retired_at TEXT,
     retired_reason TEXT
 );
-CREATE TABLE IF NOT EXISTS rule (
+CREATE TABLE IF NOT EXISTS blocker (
     id TEXT PRIMARY KEY,
-    signature_id TEXT REFERENCES signature(id),
-    job_contains TEXT,
-    issue TEXT,
-    expires TEXT,
-    not_covered TEXT NOT NULL,
-    approved_by TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    culprit_repo TEXT CHECK (culprit_repo IS NULL OR culprit_repo IN (
+        'CUBRID/cubrid', 'CUBRID/cubrid-testcases', 'CUBRID/cubrid-testcases-private-ex')),
+    culprit_commit TEXT,
+    culprit_pr INTEGER CHECK (culprit_pr IS NULL OR culprit_pr > 0),
+    culprit_issue TEXT,
+    culprit_author TEXT,
+    culprit_confidence TEXT NOT NULL DEFAULT 'confirmed'
+        CHECK (culprit_confidence IN ('confirmed', 'suspected')),
+    culprit_note TEXT NOT NULL DEFAULT '',
+    fix_issue TEXT,
+    owner TEXT,
+    actor TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    retired_at TEXT,
+    retired_reason TEXT
+);
+CREATE TABLE IF NOT EXISTS blocker_pr (
+    blocker_id TEXT NOT NULL REFERENCES blocker(id),
+    repository TEXT NOT NULL CHECK (repository IN (
+        'CUBRID/cubrid', 'CUBRID/cubrid-testcases', 'CUBRID/cubrid-testcases-private-ex')),
+    pr_number INTEGER NOT NULL CHECK (pr_number > 0),
+    target_branch TEXT NOT NULL DEFAULT 'develop',
+    required INTEGER NOT NULL DEFAULT 1 CHECK (required IN (0, 1)),
+    actor TEXT NOT NULL,
     created_at TEXT NOT NULL,
     retired_at TEXT,
     retired_reason TEXT,
-    CHECK ((signature_id IS NULL) <> (job_contains IS NULL)),
-    CHECK (issue IS NOT NULL OR expires IS NOT NULL)
+    PRIMARY KEY (blocker_id, repository, pr_number)
 );
+CREATE TABLE IF NOT EXISTS blocker_signature (
+    blocker_id TEXT NOT NULL REFERENCES blocker(id),
+    signature_id TEXT NOT NULL REFERENCES signature(id),
+    actor TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (blocker_id, signature_id)
+);
+{RULE_TABLE.replace('CREATE TABLE', 'CREATE TABLE IF NOT EXISTS', 1)}
 CREATE TABLE IF NOT EXISTS event (
     id INTEGER PRIMARY KEY,
     at TEXT NOT NULL,
@@ -171,6 +288,7 @@ class Store:
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.executescript(SCHEMA)
         self._migrate_signature()
+        self._migrate_v2()
 
     def _migrate_signature(self):
         """Rebuild `signature` once when it still has the frames-only CHECK."""
@@ -193,6 +311,58 @@ class Store:
                     self.db.execute("ALTER TABLE signature_new RENAME TO signature")
                     if bad := self.db.execute("PRAGMA foreign_key_check").fetchall():
                         raise RegistryError(f"signature migration broke foreign keys: {bad}")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+            self.db.execute("COMMIT")
+        finally:
+            self.db.execute("PRAGMA foreign_keys=ON")
+
+    def _migrate_v2(self):
+        """Upgrade v1 DBs to schema version 2 (blocker tables, rule.blocker_id, issue_link PK)."""
+        version = self.db.execute("PRAGMA user_version").fetchone()[0]
+        if version >= SCHEMA_VERSION:
+            return
+        rule_sql = self.db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='rule'").fetchone()[0]
+        link_sql = self.db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='issue_link'").fetchone()[0]
+        needs_rule_rebuild = "blocker_id" not in rule_sql
+        needs_link_rebuild = "PRIMARY KEY" in link_sql
+
+        self.db.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                version = self.db.execute("PRAGMA user_version").fetchone()[0]
+                if version < SCHEMA_VERSION:
+                    if needs_link_rebuild:
+                        self.db.execute(
+                            ISSUE_LINK_TABLE.replace("issue_link", "issue_link_new", 1))
+                        self.db.execute(
+                            "INSERT INTO issue_link_new"
+                            " SELECT testcase_id, issue, relation, signature_id, actor, created_at"
+                            " FROM issue_link")
+                        self.db.execute("DROP TABLE issue_link")
+                        self.db.execute("ALTER TABLE issue_link_new RENAME TO issue_link")
+                        self.db.execute(
+                            "CREATE UNIQUE INDEX IF NOT EXISTS issue_link_uniq"
+                            " ON issue_link(testcase_id, issue, relation,"
+                            " COALESCE(signature_id, ''))")
+                    if needs_rule_rebuild:
+                        self.db.execute(RULE_TABLE.replace("rule", "rule_new", 1))
+                        self.db.execute(
+                            "INSERT INTO rule_new(id, signature_id, job_contains, issue, expires,"
+                            " blocker_id, not_covered, approved_by, created_at, retired_at,"
+                            " retired_reason)"
+                            " SELECT id, signature_id, job_contains, issue, expires, NULL,"
+                            " not_covered, approved_by, created_at, retired_at, retired_reason"
+                            " FROM rule")
+                        self.db.execute("DROP TABLE rule")
+                        self.db.execute("ALTER TABLE rule_new RENAME TO rule")
+                    if bad := self.db.execute("PRAGMA foreign_key_check").fetchall():
+                        raise RegistryError(f"v2 migration broke foreign keys: {bad}")
+                    self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             except BaseException:
                 self.db.execute("ROLLBACK")
                 raise
@@ -315,30 +485,44 @@ class Store:
             return self._link(tc, issue, relation, sig_id)
 
     def _link(self, tc, issue, relation, sig_id):
-        row = self._row(
-            "SELECT signature_id FROM issue_link WHERE testcase_id=? AND issue=? AND relation=?",
-            tc.id, issue, relation)
-        if row is not None:
-            if row["signature_id"] == sig_id or sig_id is None:
+        exact = self._row(
+            "SELECT signature_id FROM issue_link"
+            " WHERE testcase_id=? AND issue=? AND relation=?"
+            " AND COALESCE(signature_id, '') = COALESCE(?, '')",
+            tc.id, issue, relation, sig_id)
+        if exact is not None:
+            return "unchanged"
+        if sig_id is None:
+            any_row = self._row(
+                "SELECT 1 FROM issue_link WHERE testcase_id=? AND issue=? AND relation=?",
+                tc.id, issue, relation)
+            if any_row is not None:
                 return "unchanged"
-            self.db.execute(
-                "UPDATE issue_link SET signature_id=?"
-                " WHERE testcase_id=? AND issue=? AND relation=?",
-                (sig_id, tc.id, issue, relation))
-            self._event("link", "issue_link", _key((tc.id, issue, relation)), row,
-                        {"signature_id": sig_id})
-            return "updated"
+        else:
+            null_row = self._row(
+                "SELECT signature_id FROM issue_link"
+                " WHERE testcase_id=? AND issue=? AND relation=? AND signature_id IS NULL",
+                tc.id, issue, relation)
+            if null_row is not None:
+                self.db.execute(
+                    "UPDATE issue_link SET signature_id=?"
+                    " WHERE testcase_id=? AND issue=? AND relation=? AND signature_id IS NULL",
+                    (sig_id, tc.id, issue, relation))
+                self._event("link", "issue_link", _key((tc.id, issue, relation)),
+                            {"signature_id": None}, {"signature_id": sig_id})
+                return "updated"
         self.db.execute(
             "INSERT INTO issue_link VALUES (?, ?, ?, ?, ?, ?)",
             (tc.id, issue, relation, sig_id, self.actor, now()))
-        self._event("link", "issue_link", _key((tc.id, issue, relation)), None,
+        self._event("link", "issue_link", _key((tc.id, issue, relation, sig_id or "")), None,
                     {"signature_id": sig_id})
         return "added"
 
     def links(self, tc: Testcase):
         return [dict(r) for r in self.db.execute(
             "SELECT issue, relation, signature_id, actor, created_at FROM issue_link"
-            " WHERE testcase_id=? ORDER BY relation, issue", (tc.id,))]
+            " WHERE testcase_id=? ORDER BY relation, issue, COALESCE(signature_id, '')",
+            (tc.id,))]
 
     def add_note(self, tc: Testcase, body, refs) -> str:
         with self.write():
@@ -361,23 +545,389 @@ class Store:
             (tc.id,))
         return [dict(r, refs=json.loads(r["refs"])) for r in rows]
 
+    # Blockers
+
+    def _validate_blocker_fields(self, *, culprit_repo, culprit_commit, culprit_pr,
+                                 culprit_issue, culprit_confidence, fix_issue):
+        if culprit_repo is not None:
+            culprit_repo = check_repo(culprit_repo)
+        if culprit_commit is not None:
+            culprit_commit = check_commit_sha(culprit_commit)
+        if culprit_pr is not None:
+            if culprit_pr < 1:
+                raise RegistryError(f"culprit PR must be positive: {culprit_pr!r}")
+            culprit_repo = culprit_repo or "CUBRID/cubrid"
+        if culprit_issue is not None:
+            check_issue_key(culprit_issue)
+        if culprit_confidence not in CONFIDENCES:
+            raise RegistryError(
+                f"culprit confidence must be one of {', '.join(CONFIDENCES)}:"
+                f" {culprit_confidence!r}"
+            )
+        if fix_issue is not None:
+            check_issue_key(fix_issue)
+        return culprit_repo, culprit_commit
+
+    def add_blocker(
+        self,
+        blocker_id: str,
+        *,
+        title: str = "",
+        culprit_repo: str | None = None,
+        culprit_commit: str | None = None,
+        culprit_pr: int | None = None,
+        culprit_issue: str | None = None,
+        culprit_author: str | None = None,
+        culprit_confidence: str = "confirmed",
+        culprit_note: str = "",
+        fix_issue: str | None = None,
+        owner: str | None = None,
+        prs: list[tuple[str, int, str, bool]] = (),
+        signatures: list[str] = (),
+        rules: list[str] = (),
+    ) -> str:
+        blocker_id = check_blocker_id(blocker_id)
+        culprit_repo, culprit_commit = self._validate_blocker_fields(
+            culprit_repo=culprit_repo, culprit_commit=culprit_commit, culprit_pr=culprit_pr,
+            culprit_issue=culprit_issue, culprit_confidence=culprit_confidence,
+            fix_issue=fix_issue,
+        )
+        for repo, pr_num, _, _ in prs:
+            check_repo(repo)
+            if pr_num < 1:
+                raise RegistryError(f"PR number must be positive: {pr_num!r}")
+        for sig_id in signatures:
+            if self.signature(sig_id) is None:
+                raise RegistryError(f"no signature {sig_id}")
+        for rule_id in rules:
+            r = self._row("SELECT id, retired_at FROM rule WHERE id=?", rule_id)
+            if r is None:
+                raise RegistryError(f"no rule {rule_id}")
+
+        core = {
+            "title": title,
+            "culprit_repo": culprit_repo,
+            "culprit_commit": culprit_commit,
+            "culprit_pr": culprit_pr,
+            "culprit_issue": culprit_issue,
+            "culprit_author": culprit_author,
+            "culprit_confidence": culprit_confidence,
+            "culprit_note": culprit_note,
+            "fix_issue": fix_issue,
+            "owner": owner,
+        }
+        with self.write():
+            existing = self._row("SELECT * FROM blocker WHERE id=?", blocker_id)
+            changed = False
+            if existing:
+                if existing["retired_at"] is not None:
+                    raise RegistryError(f"blocker {blocker_id} is retired")
+                if {k: existing[k] for k in core} != core:
+                    raise RegistryError(
+                        f"blocker {blocker_id} exists with other content; use update"
+                    )
+                result = "unchanged"
+            else:
+                self.db.execute(
+                    "INSERT INTO blocker(id, title, culprit_repo, culprit_commit, culprit_pr,"
+                    " culprit_issue, culprit_author, culprit_confidence, culprit_note,"
+                    " fix_issue, owner, actor, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (blocker_id, title, culprit_repo, culprit_commit, culprit_pr,
+                     culprit_issue, culprit_author, culprit_confidence, culprit_note,
+                     fix_issue, owner, self.actor, now()),
+                )
+                self._event("blocker add", "blocker", blocker_id, None, core)
+                result = "added"
+            for repo, pr_num, target_branch, required in prs:
+                res_pr = self._add_blocker_pr(
+                    blocker_id, check_repo(repo), pr_num,
+                    target_branch=target_branch, required=required,
+                )
+                if res_pr != "unchanged":
+                    changed = True
+            for sig_id in signatures:
+                if self._link_blocker_signature(blocker_id, sig_id) != "unchanged":
+                    changed = True
+            for rule_id in rules:
+                if self._set_rule_blocker(rule_id, blocker_id) != "unchanged":
+                    changed = True
+        return "added" if result == "added" else ("updated" if changed else "unchanged")
+
+    def update_blocker(self, blocker_id: str, **updates) -> str:
+        blocker_id = check_blocker_id(blocker_id)
+        allowed = (
+            "title", "culprit_repo", "culprit_commit", "culprit_pr", "culprit_issue",
+            "culprit_author", "culprit_confidence", "culprit_note", "fix_issue", "owner",
+        )
+        with self.write():
+            existing = self._row("SELECT * FROM blocker WHERE id=?", blocker_id)
+            if existing is None:
+                raise RegistryError(f"no blocker {blocker_id}")
+            if existing["retired_at"] is not None:
+                raise RegistryError(f"blocker {blocker_id} is retired")
+            merged = {k: existing[k] for k in allowed}
+            for k, v in updates.items():
+                if k in allowed and v is not None:
+                    merged[k] = v
+            culprit_repo, culprit_commit = self._validate_blocker_fields(
+                culprit_repo=merged["culprit_repo"],
+                culprit_commit=merged["culprit_commit"],
+                culprit_pr=merged["culprit_pr"],
+                culprit_issue=merged["culprit_issue"],
+                culprit_confidence=merged["culprit_confidence"],
+                fix_issue=merged["fix_issue"],
+            )
+            merged["culprit_repo"] = culprit_repo
+            merged["culprit_commit"] = culprit_commit
+            before = {k: existing[k] for k in allowed}
+            if before == merged:
+                return "unchanged"
+            sets = ", ".join(f"{k}=?" for k in allowed)
+            self.db.execute(f"UPDATE blocker SET {sets} WHERE id=?",
+                            (*[merged[k] for k in allowed], blocker_id))
+            self._event("blocker update", "blocker", blocker_id, before, merged)
+            if merged["fix_issue"] and merged["fix_issue"] != existing["fix_issue"]:
+                for sig_id in self._blocker_signature_ids(blocker_id):
+                    sig = self.signature(sig_id)
+                    if sig:
+                        tc = self._row("SELECT * FROM testcase WHERE id=?", sig["testcase_id"])
+                        self._link(Testcase(**tc), merged["fix_issue"], "tracks", sig_id)
+        return "updated"
+
+    def retire_blocker(self, blocker_id: str, reason: str) -> str:
+        blocker_id = check_blocker_id(blocker_id)
+        with self.write():
+            row = self._row("SELECT * FROM blocker WHERE id=?", blocker_id)
+            if row is None:
+                raise RegistryError(f"no blocker {blocker_id}")
+            if row["retired_at"]:
+                return "unchanged"
+            self.db.execute("UPDATE blocker SET retired_at=?, retired_reason=? WHERE id=?",
+                            (now(), reason, blocker_id))
+            self._event("blocker retire", "blocker", blocker_id, {"retired_at": None},
+                        {"retired_reason": reason})
+        return "retired"
+
+    def _add_blocker_pr(self, blocker_id: str, repository: str, pr_number: int, *,
+                        target_branch: str = "develop", required: bool = True) -> str:
+        req_int = 1 if required else 0
+        key = (blocker_id, repository, pr_number)
+        row = self._row(
+            "SELECT * FROM blocker_pr WHERE blocker_id=? AND repository=? AND pr_number=?", *key)
+        after = {"target_branch": target_branch, "required": req_int, "retired_at": None}
+        if row is not None:
+            before = {"target_branch": row["target_branch"], "required": row["required"],
+                      "retired_at": row["retired_at"]}
+            if before == after:
+                return "unchanged"
+            self.db.execute(
+                "UPDATE blocker_pr SET target_branch=?, required=?, retired_at=NULL,"
+                " retired_reason=NULL WHERE blocker_id=? AND repository=? AND pr_number=?",
+                (target_branch, req_int, *key),
+            )
+            self._event("blocker pr add", "blocker_pr", _key(key), before, after)
+            return "updated"
+        self.db.execute(
+            "INSERT INTO blocker_pr(blocker_id, repository, pr_number, target_branch,"
+            " required, actor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (*key, target_branch, req_int, self.actor, now()),
+        )
+        self._event("blocker pr add", "blocker_pr", _key(key), None,
+                    {"target_branch": target_branch, "required": req_int})
+        return "added"
+
+    def add_blocker_pr(self, blocker_id: str, repository: str, pr_number: int, *,
+                       target_branch: str = "develop", required: bool = True) -> str:
+        blocker_id = check_blocker_id(blocker_id)
+        repository = check_repo(repository)
+        if pr_number < 1:
+            raise RegistryError(f"PR number must be positive: {pr_number!r}")
+        with self.write():
+            b = self._row("SELECT id, retired_at FROM blocker WHERE id=?", blocker_id)
+            if b is None:
+                raise RegistryError(f"no blocker {blocker_id}")
+            if b["retired_at"] is not None:
+                raise RegistryError(f"blocker {blocker_id} is retired")
+            return self._add_blocker_pr(blocker_id, repository, pr_number,
+                                        target_branch=target_branch, required=required)
+
+    def retire_blocker_pr(self, blocker_id: str, repository: str, pr_number: int,
+                          reason: str) -> str:
+        blocker_id = check_blocker_id(blocker_id)
+        repository = check_repo(repository)
+        key = (blocker_id, repository, pr_number)
+        with self.write():
+            row = self._row(
+                "SELECT * FROM blocker_pr WHERE blocker_id=? AND repository=? AND pr_number=?",
+                *key,
+            )
+            if row is None:
+                raise RegistryError(f"no blocker PR {repository}#{pr_number} on {blocker_id}")
+            if row["retired_at"]:
+                return "unchanged"
+            self.db.execute(
+                "UPDATE blocker_pr SET retired_at=?, retired_reason=?"
+                " WHERE blocker_id=? AND repository=? AND pr_number=?",
+                (now(), reason, *key),
+            )
+            self._event("blocker pr retire", "blocker_pr", _key(key),
+                        {"retired_at": None}, {"retired_reason": reason})
+        return "retired"
+
+    def _link_blocker_signature(self, blocker_id: str, signature_id: str) -> str:
+        b = self._row("SELECT * FROM blocker WHERE id=?", blocker_id)
+        if b is None:
+            raise RegistryError(f"no blocker {blocker_id}")
+        sig = self.signature(signature_id)
+        if sig is None:
+            raise RegistryError(f"no signature {signature_id}")
+        existing = self._row(
+            "SELECT 1 FROM blocker_signature WHERE blocker_id=? AND signature_id=?",
+            blocker_id, signature_id)
+        if existing is not None:
+            return "unchanged"
+        self.db.execute(
+            "INSERT INTO blocker_signature(blocker_id, signature_id, actor, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (blocker_id, signature_id, self.actor, now()),
+        )
+        self._event("blocker link", "blocker_signature", _key((blocker_id, signature_id)),
+                    None, {"blocker_id": blocker_id, "signature_id": signature_id})
+        if b["fix_issue"]:
+            tc = self._row("SELECT * FROM testcase WHERE id=?", sig["testcase_id"])
+            self._link(Testcase(**tc), b["fix_issue"], "tracks", signature_id)
+        return "added"
+
+    def link_blocker(self, blocker_id: str, *, signatures: list[str] = (),
+                     rules: list[str] = ()) -> str:
+        blocker_id = check_blocker_id(blocker_id)
+        if not signatures and not rules:
+            raise RegistryError("pass at least one --signature or --rule")
+        with self.write():
+            b = self._row("SELECT id FROM blocker WHERE id=?", blocker_id)
+            if b is None:
+                raise RegistryError(f"no blocker {blocker_id}")
+            changed = False
+            for sig_id in signatures:
+                if self._link_blocker_signature(blocker_id, sig_id) != "unchanged":
+                    changed = True
+            for rule_id in rules:
+                if self._set_rule_blocker(rule_id, blocker_id) != "unchanged":
+                    changed = True
+        return "updated" if changed else "unchanged"
+
+    def _set_rule_blocker(self, rule_id: str, blocker_id: str) -> str:
+        b = self._row("SELECT * FROM blocker WHERE id=?", blocker_id)
+        if b is None:
+            raise RegistryError(f"no blocker {blocker_id}")
+        row = self._row("SELECT * FROM rule WHERE id=?", rule_id)
+        if row is None:
+            raise RegistryError(f"no rule {rule_id}")
+        if row["blocker_id"] == blocker_id:
+            return "unchanged"
+        self.db.execute("UPDATE rule SET blocker_id=? WHERE id=?", (blocker_id, rule_id))
+        self._event("blocker link", "rule", rule_id,
+                    {"blocker_id": row["blocker_id"]}, {"blocker_id": blocker_id})
+        if row["signature_id"]:
+            self._link_blocker_signature(blocker_id, row["signature_id"])
+        return "updated"
+
+    def _blocker_signature_ids(self, blocker_id: str) -> list[str]:
+        return [r[0] for r in self.db.execute(
+            "SELECT signature_id FROM blocker_signature WHERE blocker_id=? ORDER BY signature_id",
+            (blocker_id,))]
+
+    def _hydrate_blocker(self, row: dict, *, include_retired_prs: bool = False) -> dict:
+        b = dict(row)
+        pr_sql = "SELECT * FROM blocker_pr WHERE blocker_id=?"
+        if not include_retired_prs:
+            pr_sql += " AND retired_at IS NULL"
+        pr_sql += " ORDER BY required DESC, repository, pr_number"
+        b["prs"] = [dict(r) for r in self.db.execute(pr_sql, (b["id"],))]
+        sig_rows = self.db.execute(
+            "SELECT s.id, s.testcase_id, s.label, t.suite, t.path"
+            " FROM blocker_signature bs"
+            " JOIN signature s ON s.id = bs.signature_id"
+            " JOIN testcase t ON t.id = s.testcase_id"
+            " WHERE bs.blocker_id=? ORDER BY t.suite, t.path, s.id",
+            (b["id"],),
+        ).fetchall()
+        b["signatures"] = [dict(r) for r in sig_rows]
+        b["rules"] = [dict(r) for r in self.db.execute(
+            "SELECT id, signature_id, job_contains, issue, expires, retired_at"
+            " FROM rule WHERE blocker_id=? ORDER BY id", (b["id"],))]
+        return b
+
+    def blocker(self, blocker_id: str, *, include_retired_prs: bool = False) -> dict | None:
+        row = self._row("SELECT * FROM blocker WHERE id=?", blocker_id)
+        if row is None:
+            return None
+        return self._hydrate_blocker(row, include_retired_prs=include_retired_prs)
+
+    def blockers(self, *, active_only: bool = True) -> list[dict]:
+        sql = "SELECT * FROM blocker"
+        if active_only:
+            sql += " WHERE retired_at IS NULL"
+        sql += " ORDER BY id"
+        return [self._hydrate_blocker(dict(r)) for r in self.db.execute(sql)]
+
+    def blockers_for_testcase(self, tc: Testcase, *, active_only: bool = True) -> list[dict]:
+        sql = (
+            "SELECT DISTINCT b.* FROM blocker b"
+            " LEFT JOIN blocker_signature bs ON bs.blocker_id = b.id"
+            " LEFT JOIN signature s ON s.id = bs.signature_id"
+            " LEFT JOIN rule r ON r.blocker_id = b.id"
+            " LEFT JOIN signature rs ON rs.id = r.signature_id"
+            " WHERE (s.testcase_id = ? OR rs.testcase_id = ?)"
+        )
+        if active_only:
+            sql += " AND b.retired_at IS NULL"
+        sql += " ORDER BY b.id"
+        return [self._hydrate_blocker(dict(r)) for r in self.db.execute(sql, (tc.id, tc.id))]
+
+    def blocker_for_rule(self, rule: dict) -> dict | None:
+        """Resolve the blocker associated with a rule: explicit blocker_id, else via signature."""
+        if rule.get("blocker_id"):
+            return self.blocker(rule["blocker_id"])
+        if rule.get("signature_id"):
+            row = self._row(
+                "SELECT b.* FROM blocker b"
+                " JOIN blocker_signature bs ON bs.blocker_id = b.id"
+                " WHERE bs.signature_id = ? AND b.retired_at IS NULL"
+                " ORDER BY b.id LIMIT 1",
+                rule["signature_id"],
+            )
+            if row:
+                return self._hydrate_blocker(row)
+        return None
+
     def add_rule(self, rule_id, *, sig_id, job_contains, issue, expires, not_covered,
-                 approved_by) -> str:
+                 approved_by, blocker_id=None) -> str:
         if (sig_id is None) == (job_contains is None):
             raise RegistryError("a rule needs exactly one of --signature and --job-contains")
-        if issue is None and expires is None:
-            raise RegistryError("a rule without --issue needs --expires")
+        if issue is None and expires is None and blocker_id is None:
+            raise RegistryError("a rule without --issue or --blocker needs --expires")
         if issue is not None:
             check_issue_key(issue)
         if expires is not None:
             expires = check_date(expires)
+        if blocker_id is not None:
+            blocker_id = check_blocker_id(blocker_id)
+            b = self._row("SELECT * FROM blocker WHERE id=?", blocker_id)
+            if b is None:
+                raise RegistryError(f"no blocker {blocker_id}")
+            if b["retired_at"] is not None:
+                raise RegistryError(f"blocker {blocker_id} is retired")
+            if issue is None and b["fix_issue"]:
+                issue = b["fix_issue"]
         sig = None
         if sig_id is not None:
             sig = self.signature(sig_id)
             if sig is None:
                 raise RegistryError(f"no signature {sig_id}")
         after = {"signature_id": sig_id, "job_contains": job_contains, "issue": issue,
-                 "expires": expires, "not_covered": not_covered}
+                 "expires": expires, "blocker_id": blocker_id, "not_covered": not_covered}
         with self.write():
             existing = self._row("SELECT * FROM rule WHERE id=?", rule_id)
             if existing:
@@ -385,13 +935,16 @@ class Store:
                     return "unchanged"
                 raise RegistryError(f"rule {rule_id} exists with other content or is retired")
             self.db.execute(
-                "INSERT INTO rule(id, signature_id, job_contains, issue, expires, not_covered,"
-                " approved_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (rule_id, sig_id, job_contains, issue, expires, not_covered, approved_by, now()))
+                "INSERT INTO rule(id, signature_id, job_contains, issue, expires, blocker_id,"
+                " not_covered, approved_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (rule_id, sig_id, job_contains, issue, expires, blocker_id,
+                 not_covered, approved_by, now()))
             self._event("rule add", "rule", rule_id, None, dict(after, approved_by=approved_by))
             if issue is not None and sig is not None:
                 tc = self._row("SELECT * FROM testcase WHERE id=?", sig["testcase_id"])
                 self._link(Testcase(**tc), issue, "tracks", sig_id)
+            if blocker_id is not None and sig is not None:
+                self._link_blocker_signature(blocker_id, sig_id)
         return "added"
 
     def retire_rule(self, rule_id, reason) -> str:
@@ -427,6 +980,7 @@ class Store:
         if tc is not None:
             sig_ids = {s["id"] for s in self.signatures(tc)}
             rule_ids = {r["id"] for r in self.rules(tc=tc, active_only=False)}
+            blocker_ids = {b["id"] for b in self.blockers_for_testcase(tc, active_only=False)}
             note_ids = {str(r["id"]) for r in self.db.execute(
                 "SELECT id FROM note WHERE testcase_id=?", (tc.id,))}
 
@@ -443,6 +997,12 @@ class Store:
                         return parts[0] == str(tc.id)
                     case "occurrence":
                         return parts[4] == str(tc.id)
+                    case "blocker":
+                        return key in blocker_ids
+                    case "blocker_pr":
+                        return parts[0] in blocker_ids
+                    case "blocker_signature":
+                        return parts[0] in blocker_ids or parts[1] in sig_ids
                 return False
 
             rows = [e for e in rows if mine(e)]
@@ -465,9 +1025,15 @@ class Store:
                     sig["testcase_id"], r["issue"])
                 if not has:
                     problems.append(f"rule {r['id']} has no tracks link to {r['issue']}")
-        for r in self.db.execute("SELECT issue FROM issue_link UNION SELECT issue FROM rule"):
+        for r in self.db.execute(
+            "SELECT issue FROM issue_link UNION SELECT issue FROM rule"
+            " UNION SELECT culprit_issue FROM blocker UNION SELECT fix_issue FROM blocker"
+        ):
             if r[0] is not None and not ISSUE_KEY.match(r[0]):
                 problems.append(f"bad issue key {r[0]!r}")
+        for r in self.db.execute("SELECT id, culprit_commit FROM blocker"):
+            if r[1] is not None and not COMMIT_SHA.match(r[1]):
+                problems.append(f"blocker {r[0]} has bad culprit_commit {r[1]!r}")
         for r in self.db.execute("SELECT id, required_text FROM signature"):
             if not isinstance(json.loads(r[1]), list):
                 problems.append(f"signature {r[0]} required_text is not a list")
