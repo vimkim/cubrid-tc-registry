@@ -330,8 +330,9 @@ cubrid-tcr check \
 ### 개발 및 설치 (`0.2.1`)
 
 ```bash
-just verify   # unittest 및 ruff 린트 실행
-just sync     # primary main 체크아웃에서 cubrid-tcr 전역 설치 (uv tool install --reinstall .)
+just verify         # unittest 및 ruff 린트 실행
+just install        # primary main 체크아웃에서 cubrid-tcr CLI 및 AI 에이전트 스킬 동시 설치 (`just sync` 별칭)
+just install-skills # 동봉된 AI 에이전트 스킬(skills/cubrid-tcr/SKILL.md)만 ~/.agents·~/.codex·~/.claude에 설치
 ```
 
 - 상세 설계 배경은 `my-cubrid-skills` 저장소의 `docs/testcase-registry-design.md` 문서를 참고하세요.
