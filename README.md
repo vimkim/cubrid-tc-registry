@@ -45,7 +45,7 @@ CI가 깨졌을 때 가장 먼저 드는 의문은 보통 두 가지입니다.
 |---|---|---|
 | **핵심 역할** | CI **사실 이력(History)** 수집·인덱싱 | 실패에 대한 **팀 지식·판단·블로커** 관리 및 판정 |
 | **저장 내용** | 실행(`run`), 샤드, PASS/FAIL 결과, PR 메타데이터, 원본 로그 체크섬 | `signature`, `occurrence_signature`, `issue_link`, `note`, `rule`, `blocker`, `event` |
-| **데이터 출처** | GitHub Actions (`gha-ci`) &amp; 내부 결과 저장소 | 사람의 분석·승인 + `cubrid-tcc` / `cubrid-ci` / JIRA / GitHub / `git` 연동 |
+| **데이터 출처** | GitHub Actions (`gha-ci`) & 내부 결과 저장소 | 사람의 분석·승인 + `cubrid-tcc` / `cubrid-ci` / JIRA / GitHub / `git` 연동 |
 | **쓰기/승인 원칙** | CI 실행 결과를 변경 없이 원자적으로 색인 | `signature`/`link`/`note`/`blocker`는 기록 가능, **`rule`은 사람 승인(`--yes --approved-by`) 필수** |
 | **대표 질문** | *"이 테스트 최근 14일간 몇 번 깨졌어? 플래키해?"* | *"이 코어 덤프가 Known Issue야? 수정 PR 머지돼서 내 PR 리베이스해도 돼?"* |
 
@@ -139,7 +139,7 @@ cubrid-tcr check --case cbrd_27179 --suite shell --engine cd24a21 --stack-file c
 
 ---
 
-### ③ 블로커 추적 &amp; 내 PR 언블록 여부 확인 (`blocker`, `blockers`, `unblock`)
+### ③ 블로커 추적 & 내 PR 언블록 여부 확인 (`blocker`, `blockers`, `unblock`)
 
 블로커는 여러 테스트케이스나 PR을 동시에 막고 있는 장애를 **원인 커밋/PR(`culprit`), 수정 이슈(`--fix-issue`), 필수/선택 수정 PR(`--pr`, `--pr-optional`), 담당자(`--owner`)** 단위로 1급 객체로 추적합니다.
 
@@ -174,6 +174,9 @@ cubrid-tcr blockers --affected-days 7
 
 # 머지가 끝나 바로 언블록 가능한 블로커만 필터링
 cubrid-tcr blockers --ready-only --branch develop
+
+# 특정 블로커 ID 또는 수정 CBRD 키로 필터링 (은퇴된 블로커 포함)
+cubrid-tcr blockers --key CBRD-28395
 ```
 
 - **실시간 준비 상태(`readiness`)**:
@@ -281,7 +284,7 @@ cubrid-tcr check \
 | `cubrid-tcr link CASE --issue KEY --relation R [--signature ID]` | 테스트케이스와 JIRA 이슈 연결 (`origin`, `tracks`, `suspected`, `fixed_by`) |
 | `cubrid-tcr note CASE --body TEXT [--ref REF]...` | 테스트케이스에 누적 메모 추가 |
 | `cubrid-tcr blocker add\|update\|show\|retire\|link\|pr ...` | 블로커의 원인 커밋/PR, 수정 이슈, 필수/선택 수정 PR, 담당자, 연결 시그니처/규칙 관리 |
-| `cubrid-tcr blockers [--branch B] [--ready-only] [--all] [--affected-days N]` | 모든 활성 블로커의 실시간 JIRA/GitHub PR 준비 상태 및 영향받는 오픈 PR 현황판 |
+| `cubrid-tcr blockers [--key KEY]... [--branch B] [--ready-only] [--all] [--affected-days N]` | 모든 활성 블로커의 실시간 JIRA/GitHub PR 준비 상태 및 영향받는 오픈 PR 현황판 |
 | `cubrid-tcr unblock --pr N [--branch B] [--offline]` | 특정 PR의 최신 실패가 `develop` 기준으로 언블록되었는지 판정 및 다음 행동 안내 |
 | `cubrid-tcr rule add ...` / `rule retire ID --reason TEXT` | Known-Issue 규칙 추가(기본 드라이런, `--yes --approved-by`로 반영) 및 은퇴 |
 | `cubrid-tcr rules [--audit] [--all]` | 규칙 목록 조회 및 실시간 이슈/만료/블로커 상태 감사 |
@@ -324,7 +327,7 @@ cubrid-tcr check \
 - **`gh` (GitHub CLI)**, **`git`**, **`jira.cubrid.org`** 네트워크 접근 (실시간 PR·이슈·커밋 확인용, `--offline`으로 생략 가능)
 - **`cubrid-xref`** (선택): 수정 PR이 아직 연결되지 않은 블로커의 연관 PR 자동 탐색용
 
-### 개발 및 설치 (`0.2.0`)
+### 개발 및 설치 (`0.2.1`)
 
 ```bash
 just verify   # unittest 및 ruff 린트 실행
