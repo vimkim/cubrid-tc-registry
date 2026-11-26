@@ -506,7 +506,28 @@ def _local_develop_fix_commits(issue_key: str, engine_repo: str | None) -> tuple
 
 
 def cmd_blockers(args, store):
-    blockers = store.blockers(active_only=not args.all)
+    requested_keys: list[str] = []
+    for raw_k in args.key or ():
+        k = raw_k.strip()
+        if k and k not in requested_keys:
+            requested_keys.append(k)
+    missing_keys: list[str] = []
+    if requested_keys:
+        all_blockers = store.blockers(active_only=False)
+        wanted_lower = {k.lower() for k in requested_keys}
+        blockers = [
+            b for b in all_blockers
+            if b["id"].lower() in wanted_lower
+            or (b.get("fix_issue") and b["fix_issue"].lower() in wanted_lower)
+        ]
+        matched_lower: set[str] = set()
+        for b in blockers:
+            matched_lower.add(b["id"].lower())
+            if b.get("fix_issue"):
+                matched_lower.add(b["fix_issue"].lower())
+        missing_keys = [k for k in requested_keys if k.lower() not in matched_lower]
+    else:
+        blockers = store.blockers(active_only=not args.all)
     active_rules = store.rules(active_only=True)
     rules_by_blocker: dict[str, list[dict]] = {}
     untracked_rules: list[dict] = []
@@ -606,9 +627,11 @@ def cmd_blockers(args, store):
         evaluated.append(ev)
 
     report = {
+        "schema_version": 1,
         "target_branch": args.branch,
         "blockers": evaluated,
-        "untracked_rules": [] if args.ready_only else [
+        "missing_keys": missing_keys,
+        "untracked_rules": [] if (args.ready_only or requested_keys) else [
             {"id": r["id"], "issue": r["issue"], "expires": r["expires"],
              "signature_id": r["signature_id"], "job_contains": r["job_contains"]}
             for r in untracked_rules
@@ -810,7 +833,12 @@ def cmd_unblock(args, store):
                 steps.append(f"rerun {suite_name}")
             s_entry["action"] = "; ".join(steps)
 
-    report = {"pull_request": pr_meta, "target_branch": args.branch, "suites": suites_out}
+    report = {
+        "schema_version": 1,
+        "pull_request": pr_meta,
+        "target_branch": args.branch,
+        "suites": suites_out,
+    }
     emit(args, report, render.render_unblock(report, no_color=args.no_color))
 
 
@@ -1143,6 +1171,8 @@ def parser() -> argparse.ArgumentParser:
     a.set_defaults(func=cmd_blocker_pr_retire)
 
     s = add(sub, "blockers", help="list blockers with live fix PR merge & owner readiness")
+    s.add_argument("--key", action="append",
+                   help="filter blockers by ID or fix CBRD key (repeatable; includes retired)")
     s.add_argument("--branch", default="develop", help="target branch (default: develop)")
     s.add_argument("--ready-only", action="store_true", help="show only READY blockers")
     s.add_argument("--all", action="store_true", help="include retired blockers")

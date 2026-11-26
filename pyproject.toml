@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cubrid-tc-registry"
-version = "0.2.0"
+version = "0.2.1"
 description = "Per-testcase knowledge for CUBRID CI: failure signatures, issue links, notes, and known-issue rules"
 readme = "README.md"
 requires-python = ">=3.12"

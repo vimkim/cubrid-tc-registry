@@ -597,7 +597,12 @@ class BlockerCliAndCheckTest(test_registry.CliBase):
               mock.patch.object(live, "discover_prs_for_issue", return_value=([disc_pr], None)),
               mock.patch.object(cli.chronicle, "failures", return_value=tcc_failures)):
             rep = self.run_cli("blockers", "--affected-days", "7")
+            self.assertEqual(rep["schema_version"], 1)
+            self.assertEqual(rep["missing_keys"], [])
             by_id = {b["id"]: b for b in rep["blockers"]}
+            self.assertEqual(by_id["tc-4474"]["wait_keys"], ["tc-4474"])
+            self.assertNotIn("CBRD-26357", by_id["tc-4474"]["wait_keys"])
+            self.assertEqual(by_id["CBRD-28395"]["wait_keys"], ["CBRD-28395"])
             self.assertEqual(by_id["tc-4474"]["readiness"], "READY")
             self.assertEqual(by_id["tc-4474"]["affected_open_prs"][0]["pr"], 8753)
             self.assertEqual(by_id["CBRD-28395"]["readiness"], "IN_PROGRESS")
@@ -609,16 +614,52 @@ class BlockerCliAndCheckTest(test_registry.CliBase):
             self.assertEqual(by_rule["r-sh"]["issue_assignee"], "Joon Min")
 
             unblock = self.run_cli("unblock", "--pr", "8753")
+            self.assertEqual(unblock["schema_version"], 1)
             self.assertEqual(unblock["suites"]["sql"]["status"], "READY TO UNBLOCK")
             self.assertIn("sync tc/pr-8753", unblock["suites"]["sql"]["action"])
             self.assertEqual(unblock["suites"]["shell"]["status"], "STILL BLOCKED")
             self.assertIn("CBRD-28395", unblock["suites"]["shell"]["action"])
 
-            # Verify plain render output works cleanly
+            # Verify plain render output and Rich TTY output (preserving literal brackets)
             text = render.render_unblock(unblock, no_color=True)
             self.assertIn("READY TO UNBLOCK", text)
             self.assertIn("STILL BLOCKED", text)
+            self.assertIn("[in tested: missing]", text)
+            with mock.patch.object(render, "use_rich", return_value=True):
+                rich_text = render.render_unblock(unblock, no_color=False)
+            self.assertIn("in tested: missing", rich_text)
             self.assertTrue(date.today())
+
+    def test_blockers_key_filter_includes_retired_and_reports_missing(self):
+        sql_case = "sql/_36_guava/cbrd_26795/cases/cbrd_26795.sql"
+        sh_case = "shell/_06_issues/_26_2h/cbrd_27744_sa/cases/cbrd_27744_sa.sh"
+        self.run_cli("signature", "add", sql_case, "--suite", "sql",
+                     "--id", "sig-sql", "--label", "l", "--text", "(oos time:")
+        self.run_cli("signature", "add", sh_case, "--suite", "shell",
+                     "--id", "sig-sh", "--label", "l", "--text", "NOK sa")
+        self.run_cli("blocker", "add", "slug-ret", "--fix-issue", "CBRD-28395",
+                     "--culprit-issue", "CBRD-27562", "--pr", "engine#8810",
+                     "--signature", "sig-sh", "--offline")
+        self.run_cli("blocker", "add", "tc-4474", "--pr", "tc#4474",
+                     "--signature", "sig-sql", "--offline")
+        self.run_cli("blocker", "retire", "slug-ret", "--reason", "merged and retired")
+
+        pr_8810 = pr_facts("CUBRID/cubrid", 8810, merged=True, author="JoonMin")
+        with mock.patch.object(
+            live, "read_prs_batch", return_value={("CUBRID/cubrid", 8810): pr_8810}
+        ) as m_prs:
+            res = self.run_cli("blockers", "--key", "CBRD-28395", "--key", "CBRD-99999",
+                               "--no-discover")
+        # Only PR #8810 (from matched retired blocker) should be queried, not tc#4474.
+        m_prs.assert_called_once_with({("CUBRID/cubrid", 8810)})
+        self.assertEqual(res["schema_version"], 1)
+        self.assertEqual(res["missing_keys"], ["CBRD-99999"])
+        self.assertEqual(res["untracked_rules"], [])
+        self.assertEqual(len(res["blockers"]), 1)
+        b = res["blockers"][0]
+        self.assertEqual(b["id"], "slug-ret")
+        self.assertEqual(b["wait_keys"], ["CBRD-28395", "slug-ret"])
+        self.assertEqual(b["readiness"], "READY")
 
     def test_unblock_needs_analysis_on_unclassified_or_fix_present(self):
         eng_repo, eng_base, eng_fix = self._init_git("eng4")

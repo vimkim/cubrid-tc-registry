@@ -62,7 +62,8 @@ def _format_prs(prs: list[dict]) -> str:
 def render_blockers(report: dict, *, no_color: bool = False) -> str:
     items = report.get("blockers") or []
     untracked = report.get("untracked_rules") or []
-    if not items and not untracked:
+    missing = report.get("missing_keys") or []
+    if not items and not untracked and not missing:
         return "no blockers"
 
     if use_rich(no_color):
@@ -115,6 +116,8 @@ def render_blockers(report: dict, *, no_color: bool = False) -> str:
                     f"  - {r['id']} (issue {r.get('issue') or '-'},"
                     f" expires {r.get('expires') or '-'})"
                 )
+        if missing:
+            console.print(f"[yellow]Missing keys:[/yellow] {', '.join(missing)}")
         return buf.getvalue().rstrip("\n")
 
     lines = []
@@ -153,6 +156,8 @@ def render_blockers(report: dict, *, no_color: bool = False) -> str:
             lines.append(
                 f"  {r['id']} (issue {r.get('issue') or '-'}, expires {r.get('expires') or '-'})"
             )
+    if missing:
+        lines.append(f"missing keys: {', '.join(missing)}")
     return "\n".join(lines)
 
 
@@ -204,14 +209,16 @@ def render_unblock(report: dict, *, no_color: bool = False) -> str:
         from io import StringIO
 
         from rich.console import Console
+        from rich.markup import escape
 
         buf = StringIO()
         console = Console(file=buf, force_terminal=True, highlight=False)
+        ordered_styles = sorted(_READINESS_STYLE.items(), key=lambda kv: -len(kv[0]))
         for line in lines:
-            styled = line
-            for label, style in _READINESS_STYLE.items():
+            styled = escape(line)
+            for label, style in ordered_styles:
                 if label in line:
-                    styled = line.replace(label, f"[{style}]{label}[/{style}]")
+                    styled = styled.replace(label, f"[{style}]{label}[/{style}]")
                     break
             console.print(styled)
         return buf.getvalue().rstrip("\n")

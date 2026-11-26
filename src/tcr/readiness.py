@@ -187,8 +187,14 @@ def evaluate_blocker(
         }
         pr_entries.append(entry)
 
+    wait_keys: list[str] = []
+    for k in (fix_issue, blocker["id"]):
+        if k and k not in wait_keys:
+            wait_keys.append(k)
+
     return {
         "id": blocker["id"],
+        "wait_keys": wait_keys,
         "title": blocker.get("title") or "",
         "readiness": readiness,
         "unblock_action": unblock_action,
