@@ -1,6 +1,6 @@
 ---
 name: cubrid-tcr
-description: Check and maintain CUBRID CI testcase knowledge with cubrid-tcr: failure signatures, JIRA issue links, notes, human-approved known-issue rules, blockers, and PR unblock readiness. Use when checking whether a testcase or job failure is a known issue, viewing everything known about a testcase, recording signatures/links/notes, proposing or auditing known-issue rules, tracking CI blockers, or checking whether a PR is unblocked on develop.
+description: Check and maintain CUBRID CI testcase knowledge with cubrid-tcr, including failure signatures, JIRA issue links, notes, human-approved known-issue rules, blockers, and PR unblock readiness. Use when checking whether a testcase or job failure is a known issue, viewing everything known about a testcase, recording signatures/links/notes, proposing or auditing known-issue rules, tracking CI blockers, or checking whether a PR is unblocked on develop.
 ---
 
 # cubrid-tcr (CUBRID TC Registry)
